@@ -1,0 +1,20 @@
+{
+  "version": "1.0.0",
+  "pipeline": [
+    { "id": "UploadStage", "stage": "UploadStage", "dependencies": [] },
+    { "id": "MetadataStage", "stage": "MetadataStage", "dependencies": ["UploadStage"] },
+    { "id": "WaveformStage", "stage": "WaveformStage", "dependencies": ["MetadataStage"], "parallelSafe": true },
+    { "id": "SceneDetectionStage", "stage": "SceneDetectionStage", "dependencies": ["MetadataStage"], "parallelSafe": true },
+    { "id": "FrameAnalysisStage", "stage": "FrameAnalysisStage", "dependencies": ["MetadataStage"], "parallelSafe": true },
+    { "id": "OCRStage", "stage": "OCRStage", "dependencies": ["MetadataStage"], "parallelSafe": true },
+    { "id": "AudioAnalysisStage", "stage": "AudioAnalysisStage", "dependencies": ["MetadataStage"], "parallelSafe": true },
+    { "id": "TranscriptionStage", "stage": "TranscriptionStage", "dependencies": ["MetadataStage"], "parallelSafe": true },
+    { "id": "SemanticChunkStage", "stage": "SemanticChunkStage", "dependencies": ["TranscriptionStage"] },
+    { "id": "AIAnalysisStage", "stage": "AIAnalysisStage", "dependencies": ["SemanticChunkStage", "SceneDetectionStage", "FrameAnalysisStage", "AudioAnalysisStage", "OCRStage"] },
+    { "id": "ClipRankingStage", "stage": "ClipRankingStage", "dependencies": ["AIAnalysisStage"] },
+    { "id": "TimelineStage", "stage": "TimelineStage", "dependencies": ["ClipRankingStage"] },
+    { "id": "SubtitleStage", "stage": "SubtitleStage", "dependencies": ["TimelineStage"], "parallelSafe": true },
+    { "id": "RenderingStage", "stage": "RenderingStage", "dependencies": ["TimelineStage", "SubtitleStage"] },
+    { "id": "ExportStage", "stage": "ExportStage", "dependencies": ["RenderingStage"] }
+  ]
+}
