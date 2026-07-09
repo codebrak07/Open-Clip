@@ -1,0 +1,7 @@
+{
+  "name": "groq-provider-plugin",
+  "version": "1.0.0",
+  "type": "provider",
+  "main": "index.js",
+  "description": "Groq LLM Acceleration Provider Plugin"
+}
