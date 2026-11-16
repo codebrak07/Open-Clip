@@ -75,7 +75,7 @@ const RIBBON_ENV = {
   bg: '#F5F4F0',
   textColor: '#171717',
   subTextColor: '#62615D',
-  accentAmber: '#C99E35',
+  accentAmber: '#D4A017', // Rich golden yellow
   cardBg: '#FFFFFF',
   borderColor: '#DFDDD5',
 };
@@ -180,15 +180,18 @@ export const OrganicRibbonFlow: React.FC<{
     }
     setActiveMilestone(currentStep);
 
-    // Warm Muted Amber Ribbon: brisk, responsive stroke progression
+    // Rich Golden Yellow Ribbon: smooth, calm, controlled progression
     if (pathRef.current && glowPathRef.current) {
       const len = pathRef.current.getTotalLength() || 4600;
-      const strokeRate = Math.min(1, rawProgress * 1.25);
+
+      // Smooth, gentle ribbon progression (not rushing)
+      const strokeRate = Math.min(1, rawProgress * 1.05);
+
       const targetOffset = len * (1 - strokeRate);
       pathRef.current.style.strokeDashoffset = `${targetOffset}`;
       glowPathRef.current.style.strokeDashoffset = `${targetOffset}`;
 
-      const dynamicGlowOpacity = 0.12 + 0.12 * Math.sin(rawProgress * Math.PI);
+      const dynamicGlowOpacity = 0.14 + 0.12 * Math.sin(rawProgress * Math.PI);
       const dynamicGlowWidth = 28 + 8 * Math.sin(rawProgress * Math.PI);
       glowPathRef.current.style.opacity = `${dynamicGlowOpacity}`;
       glowPathRef.current.style.strokeWidth = `${dynamicGlowWidth}`;
@@ -196,30 +199,30 @@ export const OrganicRibbonFlow: React.FC<{
 
     if (leftDeco1Ref.current) {
       const d1Len = leftDeco1Ref.current.getTotalLength() || 2400;
-      const d1Rate = Math.min(1, rawProgress * 1.25);
+      const d1Rate = Math.min(1, rawProgress * 1.05);
       leftDeco1Ref.current.style.strokeDashoffset = `${d1Len * (1 - d1Rate)}`;
-      leftDeco1Ref.current.style.opacity = `${d1Rate > 0.02 ? 0.24 : 0.06}`;
+      leftDeco1Ref.current.style.opacity = `${d1Rate > 0.02 ? 0.22 : 0.06}`;
     }
 
     if (leftDeco2Ref.current) {
       const d2Len = leftDeco2Ref.current.getTotalLength() || 2000;
       const d2Rate = Math.max(0, Math.min(1, (rawProgress - 0.42) / 0.5));
       leftDeco2Ref.current.style.strokeDashoffset = `${d2Len * (1 - d2Rate)}`;
-      leftDeco2Ref.current.style.opacity = `${d2Rate > 0.02 ? 0.20 : 0.06}`;
+      leftDeco2Ref.current.style.opacity = `${d2Rate > 0.02 ? 0.18 : 0.06}`;
     }
 
     if (rightDeco1Ref.current) {
       const d3Len = rightDeco1Ref.current.getTotalLength() || 2500;
-      const d3Rate = Math.min(1, rawProgress * 1.18);
+      const d3Rate = Math.min(1, rawProgress * 1.04);
       rightDeco1Ref.current.style.strokeDashoffset = `${d3Len * (1 - d3Rate)}`;
-      rightDeco1Ref.current.style.opacity = `${d3Rate > 0.02 ? 0.22 : 0.06}`;
+      rightDeco1Ref.current.style.opacity = `${d3Rate > 0.02 ? 0.20 : 0.06}`;
     }
 
     if (rightDeco2Ref.current) {
       const d4Len = rightDeco2Ref.current.getTotalLength() || 2100;
-      const d4Rate = Math.max(0, Math.min(1, (rawProgress - 0.4) / 0.5));
+      const d4Rate = Math.max(0, Math.min(1, (rawProgress - 0.40) / 0.5));
       rightDeco2Ref.current.style.strokeDashoffset = `${d4Len * (1 - d4Rate)}`;
-      rightDeco2Ref.current.style.opacity = `${d4Rate > 0.02 ? 0.20 : 0.06}`;
+      rightDeco2Ref.current.style.opacity = `${d4Rate > 0.02 ? 0.18 : 0.06}`;
     }
 
     if (stageRef.current) {
@@ -261,27 +264,13 @@ export const OrganicRibbonFlow: React.FC<{
     };
   }, [initializePaths, updateScrollGeometry]);
 
-  const scrollToMilestone = (step: number) => {
-    if (!containerRef.current) return;
-    const containerTop = containerRef.current.offsetTop;
-    const containerHeight = containerRef.current.offsetHeight;
-    const totalScrollable = containerHeight - window.innerHeight;
-    const targetProgress = MILESTONES[step - 1].progressThreshold;
-    const targetY = containerTop + targetProgress * totalScrollable;
-
-    window.scrollTo({
-      top: targetY,
-      behavior: 'smooth',
-    });
-  };
-
   return (
     <section
       ref={containerRef}
       style={{
         position: 'relative',
         width: '100%',
-        height: '160vh',
+        height: '320vh', // Normal, comfortable scroll pacing
         backgroundColor: RIBBON_ENV.bg,
         overflow: 'visible',
       }}
@@ -309,102 +298,6 @@ export const OrganicRibbonFlow: React.FC<{
             pointerEvents: 'none',
           }}
         />
-
-        {/* Precision Milestone & Flow HUD (Solid #FFFFFF surface, hairline border #DFDDD5) */}
-        <div
-          style={{
-            position: 'absolute',
-            top: '20px',
-            left: 0,
-            right: 0,
-            zIndex: 50,
-            display: 'flex',
-            justifyContent: 'center',
-            pointerEvents: 'none',
-          }}
-        >
-          <div
-            style={{
-              pointerEvents: 'auto',
-              display: 'inline-flex',
-              alignItems: 'center',
-              gap: '12px',
-              padding: '6px 14px',
-              backgroundColor: '#FFFFFF',
-              border: `1px solid ${RIBBON_ENV.borderColor}`,
-              borderRadius: '8px',
-              boxShadow: '0 8px 24px rgba(0, 0, 0, 0.06), 0 2px 6px rgba(0, 0, 0, 0.03)',
-            }}
-          >
-            {/* Status Indicator */}
-            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-              <span
-                style={{
-                  width: '8px',
-                  height: '8px',
-                  borderRadius: '50%',
-                  backgroundColor: RIBBON_ENV.accentAmber,
-                }}
-              />
-              <span
-                style={{
-                  fontFamily: 'ui-monospace, monospace',
-                  fontSize: '11px',
-                  fontWeight: 700,
-                  letterSpacing: '0.12em',
-                  color: RIBBON_ENV.textColor,
-                }}
-              >
-                RIBBON FLOW {Math.round(scrollProgress * 100)}%
-              </span>
-            </div>
-
-            <div
-              style={{
-                width: '1px',
-                height: '14px',
-                backgroundColor: RIBBON_ENV.borderColor,
-              }}
-            />
-
-            {/* Precision Milestone Navigation Tabs */}
-            <div style={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
-              {MILESTONES.map((m) => {
-                const isCurrent = activeMilestone === m.step;
-                const isPassed = scrollProgress >= m.progressThreshold - 0.05;
-
-                return (
-                  <button
-                    key={m.step}
-                    onClick={() => scrollToMilestone(m.step)}
-                    style={{
-                      background: isCurrent
-                        ? '#171717'
-                        : isPassed
-                          ? '#ECEAE4'
-                          : '#FFFFFF',
-                      border: isCurrent
-                        ? '1px solid #171717'
-                        : `1px solid ${RIBBON_ENV.borderColor}`,
-                      borderRadius: '4px',
-                      padding: '3px 8px',
-                      cursor: 'pointer',
-                      fontFamily: 'ui-monospace, monospace',
-                      fontSize: '11px',
-                      fontWeight: isCurrent ? 800 : 600,
-                      color: isCurrent ? '#FFFFFF' : isPassed ? RIBBON_ENV.accentAmber : '#898781',
-                      boxShadow: isCurrent ? '0 2px 6px rgba(0, 0, 0, 0.1)' : 'none',
-                      transition: 'all 0.15s ease',
-                    }}
-                    title={m.title}
-                  >
-                    0{m.step}
-                  </button>
-                );
-              })}
-            </div>
-          </div>
-        </div>
 
         {/* Translating Inner Stage Canvas */}
         <div

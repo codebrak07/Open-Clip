@@ -17,7 +17,6 @@ export const HorizontalChapterExploration: React.FC<HorizontalChapterExploration
   const trackRef = useRef<HTMLDivElement>(null);
   const rafId = useRef<number | null>(null);
 
-  const [scrollProgress, setScrollProgress] = useState(0);
   const [activeChapterIndex, setActiveChapterIndex] = useState(0);
 
   // Measure actual track dimensions and compute exact vertical scroll distance required
@@ -44,10 +43,6 @@ export const HorizontalChapterExploration: React.FC<HorizontalChapterExploration
 
     const rect = containerRef.current.getBoundingClientRect();
     const currentScroll = navOffset - rect.top;
-
-    // Overall progress [0, 1] across the entire section (including dwell)
-    const overallProg = Math.max(0, Math.min(1, currentScroll / totalVerticalScroll));
-    setScrollProgress(overallProg);
 
     // Horizontal travel progress [0, 1]
     const travelProg = Math.max(0, Math.min(1, currentScroll / scrollTravelDistance));
@@ -171,79 +166,6 @@ export const HorizontalChapterExploration: React.FC<HorizontalChapterExploration
             >
               Production Intelligence Chapters
             </h2>
-          </div>
-
-          {/* Interactive Chapter Pills & Progress Gauge */}
-          <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
-            <div
-              style={{
-                display: 'flex',
-                gap: '4px',
-                backgroundColor: '#FFFFFF',
-                padding: '4px',
-                borderRadius: '8px',
-                border: '1px solid #DFDDD5',
-                boxShadow: '0 2px 8px rgba(0, 0, 0, 0.03)',
-              }}
-            >
-              {['VIRAL FACTORY', 'FOOTBALL STUDIO', 'AI DIRECTOR', 'VIDEO EDITOR', 'INFRASTRUCTURE'].map((label, idx) => {
-                const isActive = activeChapterIndex === idx;
-                return (
-                  <button
-                    key={idx}
-                    onClick={() => scrollToChapter(idx)}
-                    title={label}
-                    style={{
-                      padding: '5px 12px',
-                      borderRadius: '5px',
-                      fontSize: '11px',
-                      fontFamily: 'ui-monospace, monospace',
-                      fontWeight: 700,
-                      border: 'none',
-                      cursor: 'pointer',
-                      backgroundColor: isActive ? '#171717' : 'transparent',
-                      color: isActive ? '#FFFFFF' : '#62615D',
-                      transition: 'all 0.15s ease',
-                    }}
-                  >
-                    0{idx + 1}
-                  </button>
-                );
-              })}
-            </div>
-
-            {/* Overall Progress Gauge */}
-            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-              <div
-                style={{
-                  width: '80px',
-                  height: '4px',
-                  backgroundColor: '#ECEAE4',
-                  borderRadius: '2px',
-                  overflow: 'hidden',
-                }}
-              >
-                <div
-                  style={{
-                    width: `${scrollProgress * 100}%`,
-                    height: '100%',
-                    backgroundColor: '#C99E35',
-                    borderRadius: '2px',
-                    transition: 'width 0.05s linear',
-                  }}
-                />
-              </div>
-              <span
-                style={{
-                  fontSize: '11px',
-                  fontFamily: 'ui-monospace, monospace',
-                  color: '#898781',
-                  minWidth: '32px',
-                }}
-              >
-                {Math.round(scrollProgress * 100)}%
-              </span>
-            </div>
           </div>
         </div>
 
