@@ -75,7 +75,7 @@ const RIBBON_ENV = {
   bg: '#F5F4F0',
   textColor: '#171717',
   subTextColor: '#62615D',
-  accentAmber: '#D4A017', // Rich golden yellow
+  accentAmber: '#D97706', // Rich, shiny golden amber with high contrast on light theme
   cardBg: '#FFFFFF',
   borderColor: '#DFDDD5',
 };
@@ -88,7 +88,7 @@ export const OrganicRibbonFlow: React.FC<{
   const stickyRef = useRef<HTMLDivElement>(null);
   const stageRef = useRef<HTMLDivElement>(null);
 
-  // Main kinetic warm amber ribbon
+  // Main kinetic proper yellow ribbon
   const pathRef = useRef<SVGPathElement>(null);
   const glowPathRef = useRef<SVGPathElement>(null);
 
@@ -180,18 +180,26 @@ export const OrganicRibbonFlow: React.FC<{
     }
     setActiveMilestone(currentStep);
 
-    // Rich Golden Yellow Ribbon: smooth, calm, controlled progression
+    // Shiny Golden Ribbon: brisk through boxes 1-2, transitioning to approved pace from box 3 onward
     if (pathRef.current && glowPathRef.current) {
       const len = pathRef.current.getTotalLength() || 4600;
 
-      // Smooth, gentle ribbon progression (not rushing)
-      const strokeRate = Math.min(1, rawProgress * 1.05);
+      let strokeRate: number;
+      if (rawProgress < 0.50) {
+        // Brisk lead through Box 1 and 2: prevents lagging or slowness
+        const t = rawProgress / 0.50;
+        strokeRate = 0.04 + Math.pow(t, 0.85) * 0.51;
+      } else {
+        // From Box 3 onward: the exact pace confirmed by the user
+        strokeRate = 0.55 + (rawProgress - 0.50) * 0.90;
+      }
+      strokeRate = Math.max(0, Math.min(1, strokeRate));
 
       const targetOffset = len * (1 - strokeRate);
       pathRef.current.style.strokeDashoffset = `${targetOffset}`;
       glowPathRef.current.style.strokeDashoffset = `${targetOffset}`;
 
-      const dynamicGlowOpacity = 0.14 + 0.12 * Math.sin(rawProgress * Math.PI);
+      const dynamicGlowOpacity = 0.16 + 0.12 * Math.sin(rawProgress * Math.PI);
       const dynamicGlowWidth = 28 + 8 * Math.sin(rawProgress * Math.PI);
       glowPathRef.current.style.opacity = `${dynamicGlowOpacity}`;
       glowPathRef.current.style.strokeWidth = `${dynamicGlowWidth}`;
@@ -199,7 +207,7 @@ export const OrganicRibbonFlow: React.FC<{
 
     if (leftDeco1Ref.current) {
       const d1Len = leftDeco1Ref.current.getTotalLength() || 2400;
-      const d1Rate = Math.min(1, rawProgress * 1.05);
+      const d1Rate = Math.min(1, rawProgress < 0.50 ? 0.04 + Math.pow(rawProgress / 0.50, 0.85) * 0.51 : 0.55 + (rawProgress - 0.50) * 0.90);
       leftDeco1Ref.current.style.strokeDashoffset = `${d1Len * (1 - d1Rate)}`;
       leftDeco1Ref.current.style.opacity = `${d1Rate > 0.02 ? 0.22 : 0.06}`;
     }
@@ -213,7 +221,7 @@ export const OrganicRibbonFlow: React.FC<{
 
     if (rightDeco1Ref.current) {
       const d3Len = rightDeco1Ref.current.getTotalLength() || 2500;
-      const d3Rate = Math.min(1, rawProgress * 1.04);
+      const d3Rate = Math.min(1, rawProgress < 0.50 ? 0.04 + Math.pow(rawProgress / 0.50, 0.85) * 0.50 : 0.55 + (rawProgress - 0.50) * 0.88);
       rightDeco1Ref.current.style.strokeDashoffset = `${d3Len * (1 - d3Rate)}`;
       rightDeco1Ref.current.style.opacity = `${d3Rate > 0.02 ? 0.20 : 0.06}`;
     }
@@ -381,14 +389,27 @@ export const OrganicRibbonFlow: React.FC<{
             viewBox="0 0 1400 3800"
             preserveAspectRatio="none"
           >
+            <defs>
+              {/* Proper Radiant Pure Yellow Ribbon Gradient - Solid rich yellows, zero white lines */}
+              <linearGradient id="properYellowRibbon" x1="0%" y1="0%" x2="100%" y2="100%">
+                <stop offset="0%" stopColor="#FFC700" />
+                <stop offset="20%" stopColor="#FFDD00" />
+                <stop offset="45%" stopColor="#FFAA00" />
+                <stop offset="70%" stopColor="#FFC700" />
+                <stop offset="85%" stopColor="#FFD400" />
+                <stop offset="100%" stopColor="#E69500" />
+              </linearGradient>
+            </defs>
+
             {/* Left Decorative Ribbon 1 */}
             <path
               ref={leftDeco1Ref}
               d={leftDeco1D}
               fill="none"
-              stroke="rgba(201, 158, 53, 0.22)"
+              stroke="url(#properYellowRibbon)"
               strokeWidth="10"
               strokeLinecap="round"
+              opacity="0.45"
               style={{ willChange: 'stroke-dashoffset, opacity' }}
             />
 
@@ -397,9 +418,10 @@ export const OrganicRibbonFlow: React.FC<{
               ref={leftDeco2Ref}
               d={leftDeco2D}
               fill="none"
-              stroke="rgba(189, 112, 69, 0.18)"
+              stroke="url(#properYellowRibbon)"
               strokeWidth="8"
               strokeLinecap="round"
+              opacity="0.38"
               style={{ willChange: 'stroke-dashoffset, opacity' }}
             />
 
@@ -408,9 +430,10 @@ export const OrganicRibbonFlow: React.FC<{
               ref={rightDeco1Ref}
               d={rightDeco1D}
               fill="none"
-              stroke="rgba(201, 158, 53, 0.20)"
+              stroke="url(#properYellowRibbon)"
               strokeWidth="10"
               strokeLinecap="round"
+              opacity="0.45"
               style={{ willChange: 'stroke-dashoffset, opacity' }}
             />
 
@@ -419,9 +442,10 @@ export const OrganicRibbonFlow: React.FC<{
               ref={rightDeco2Ref}
               d={rightDeco2D}
               fill="none"
-              stroke="rgba(189, 112, 69, 0.16)"
+              stroke="url(#properYellowRibbon)"
               strokeWidth="8"
               strokeLinecap="round"
+              opacity="0.38"
               style={{ willChange: 'stroke-dashoffset, opacity' }}
             />
 
@@ -429,8 +453,8 @@ export const OrganicRibbonFlow: React.FC<{
             <path
               d={mainRibbonD}
               fill="none"
-              stroke="rgba(0, 0, 0, 0.06)"
-              strokeWidth="36"
+              stroke="rgba(0, 0, 0, 0.08)"
+              strokeWidth="38"
               strokeLinecap="round"
             />
 
@@ -438,30 +462,30 @@ export const OrganicRibbonFlow: React.FC<{
             <path
               d={mainRibbonD}
               fill="none"
-              stroke="rgba(201, 158, 53, 0.12)"
+              stroke="rgba(255, 184, 0, 0.18)"
               strokeWidth="20"
               strokeLinecap="round"
             />
 
-            {/* Subtle Ambient Warm Glow */}
+            {/* Radiant Shiny Golden Halo */}
             <path
               ref={glowPathRef}
               d={mainRibbonD}
               fill="none"
-              stroke={RIBBON_ENV.accentAmber}
-              strokeWidth="28"
+              stroke="#FFC700"
+              strokeWidth="32"
               strokeLinecap="round"
-              opacity="0.14"
+              opacity="0.28"
               style={{ willChange: 'stroke-dashoffset, opacity, stroke-width' }}
             />
 
-            {/* Main Kinetic Ribbon Path (Warm Muted Amber #C99E35) */}
+            {/* Main Kinetic Ribbon Path: Proper Pure Yellow */}
             <path
               ref={pathRef}
               d={mainRibbonD}
               fill="none"
-              stroke={RIBBON_ENV.accentAmber}
-              strokeWidth="20"
+              stroke="url(#properYellowRibbon)"
+              strokeWidth="24"
               strokeLinecap="round"
               style={{ willChange: 'stroke-dashoffset' }}
             />
