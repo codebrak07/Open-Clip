@@ -8,6 +8,7 @@ export interface ViralityDimension {
 
 export interface ViralityMatrixResult {
   overallScore: number;
+  confidence: number;
   dimensions: ViralityDimension[];
   humanReasoning: string;
 }
@@ -49,6 +50,7 @@ export class ViralityMatrixEngine {
 
     return {
       overallScore,
+      confidence: confidence / 100,
       dimensions,
       humanReasoning: `Selected clip achieves strong virality (${overallScore}/100) driven by high hook strength (${hookStrength}) and dense speech flow.`,
     };

@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { db, Job, Clip } from '../../models/db';
+import { db, Job, Clip, FootballMatch, CommentaryScript, PublishingPackage } from '../../models/db';
 import { PluginRegistry } from '../../plugins/PluginRegistry';
 import { ModelRegistry } from '../../services/ModelRegistry';
 import { HardwareDetector } from '../../services/hardwareDetector';
@@ -11,13 +11,14 @@ import { CreatorExperienceService } from '../../core/creator/CreatorExperienceSe
 import { CreatorEditingEngine, InstructionPreset } from '../../core/creator/CreatorEditingEngine';
 import { ViralityMatrixEngine } from '../../core/reasoning/ViralityMatrixEngine';
 import { MediaTimeline } from '../../core/timeline/MediaTimeline';
+import { ProviderRegistry } from '../../services/ProviderRegistry';
+import { PythonEngineBridge } from '../../services/PythonEngineBridge';
 import { UPLOADS_DIR, OUTPUTS_DIR } from '../../config';
-import path from 'path';
-import fs from 'fs';
+import crypto from 'crypto';
 
 const v1Router = Router();
 
-// GET /v1/system / /v1/diagnostics
+// GET /v1/diagnostics
 v1Router.get('/diagnostics', async (req, res) => {
   try {
     const hardware = HardwareDetector.getDiagnostics();
@@ -42,6 +43,170 @@ v1Router.get('/plugins', (req, res) => {
 // GET /v1/models
 v1Router.get('/models', (req, res) => {
   res.json({ models: ModelRegistry.getAll() });
+});
+
+// GET /v1/providers
+v1Router.get('/providers', async (req, res) => {
+  try {
+    const available = ProviderRegistry.getAvailableProviders();
+    res.json({ providers: available });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /v1/providers/test
+v1Router.post('/providers/test', async (req, res) => {
+  try {
+    const { provider, apiKey, apiBase } = req.body;
+    if (!provider) return res.status(400).json({ error: 'provider name is required' });
+    const result = await ProviderRegistry.testProvider(provider, apiKey, apiBase);
+    res.json(result);
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /v1/providers/configure
+v1Router.post('/providers/configure', async (req, res) => {
+  try {
+    const { provider, apiKey, apiBase } = req.body;
+    if (!provider) return res.status(400).json({ error: 'provider name is required' });
+    if (apiKey) {
+      ProviderRegistry.setRuntimeKey(provider, apiKey);
+    }
+    const result = await ProviderRegistry.testProvider(provider, apiKey, apiBase);
+    res.json({
+      configured: true,
+      provider,
+      test: result,
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /v1/football/resolve
+v1Router.post('/football/resolve', async (req, res) => {
+  try {
+    const { matchText, language = 'English', style = 'Passionate Fan', sourceUrl } = req.body;
+    if (!matchText) return res.status(400).json({ error: 'matchText is required' });
+
+    // Invoke Python football resolver & commentary engine
+    const pythonResult = await PythonEngineBridge.resolveFootball(matchText, language, style);
+
+    const matchId = `match_${Date.now()}`;
+    const insertMatch = db.prepare(`
+      INSERT INTO football_matches (id, home_team, away_team, competition, scoreline, source_url, status, verified, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+
+    // Parse teams from title or fallback
+    const title = pythonResult.match_title || matchText;
+    const parts = title.split(' vs ');
+    const homeTeam = parts[0] || 'Home Team';
+    const awayTeam = (parts[1] || 'Away Team').split(' ')[0];
+
+    insertMatch.run(
+      matchId,
+      homeTeam,
+      awayTeam,
+      'League Clash',
+      'Verified',
+      sourceUrl || '',
+      'resolved',
+      1,
+      Date.now()
+    );
+
+    // Save commentary script
+    const scriptId = `script_${Date.now()}`;
+    db.prepare(`
+      INSERT INTO commentary_scripts (id, match_id, language, style, hook, segments_json, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      scriptId,
+      matchId,
+      language,
+      style,
+      pythonResult.opening_hook || '',
+      JSON.stringify(pythonResult.segments || []),
+      Date.now()
+    );
+
+    res.json({
+      matchId,
+      context: {
+        homeTeam,
+        awayTeam,
+        title: pythonResult.match_title,
+      },
+      commentary: pythonResult,
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /v1/publishing/generate
+v1Router.post('/publishing/generate', (req, res) => {
+  try {
+    const { targetId, topic, niche = 'General', summary = '', aspect = '9:16' } = req.body;
+    if (!targetId || !topic) return res.status(400).json({ error: 'targetId and topic required' });
+
+    const cleanTopic = topic.trim();
+    const primaryTitle = `${cleanTopic}: What Nobody Told You`;
+    const alternativeTitles = [
+      `The Untold Truth About ${cleanTopic}`,
+      `How ${cleanTopic} Actually Works (Full Breakdown)`,
+      `Stop Doing This If You Care About ${cleanTopic}!`,
+      `Why ${cleanTopic} Will Change Everything in 2026`,
+    ];
+
+    const primaryKw = cleanTopic.toLowerCase();
+    const seoKeywords = [primaryKw, `${primaryKw} guide`, `${primaryKw} tutorial`, `${niche.toLowerCase()} 2026`];
+    const tags = [primaryKw.replace(/\s+/g, ''), niche.toLowerCase(), 'shorts', 'reels', 'viral'];
+    const hashtags = [`#${primaryKw.replace(/\s+/g, '')}`, `#${niche.toLowerCase()}`, '#shorts', '#viral'];
+    const description = `Discover the truth about ${cleanTopic}.\n\nKey Takeaway: ${summary || 'Comprehensive breakdown for creators.'}\n\n${hashtags.join(' ')}`;
+
+    const packageId = `pub_${Date.now()}`;
+    db.prepare(`
+      INSERT INTO publishing_packages (
+        id, target_id, target_type, primary_title, alternative_titles_json,
+        description, primary_keyword, seo_keywords_json, tags_json, hashtags_json,
+        thumbnail_type, aspect_ratio, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      packageId,
+      targetId,
+      'clip',
+      primaryTitle,
+      JSON.stringify(alternativeTitles),
+      description,
+      primaryKw,
+      JSON.stringify(seoKeywords),
+      JSON.stringify(tags),
+      JSON.stringify(hashtags),
+      'frame',
+      aspect,
+      Date.now()
+    );
+
+    res.json({
+      id: packageId,
+      primaryTitle,
+      alternativeTitles,
+      description,
+      primaryKeyword: primaryKw,
+      seoKeywords,
+      tags,
+      hashtags,
+      thumbnailType: 'frame',
+      aspectRatio: aspect,
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // GET /v1/creator/alternate-edits/:clipId

@@ -149,7 +149,145 @@ db.exec(`
     timeline_path TEXT,
     FOREIGN KEY(job_id) REFERENCES jobs(id)
   );
+
+  CREATE TABLE IF NOT EXISTS football_matches (
+    id TEXT PRIMARY KEY,
+    home_team TEXT NOT NULL,
+    away_team TEXT NOT NULL,
+    competition TEXT,
+    match_date TEXT,
+    scoreline TEXT,
+    source_url TEXT,
+    status TEXT NOT NULL,
+    verified INTEGER DEFAULT 0,
+    metadata_json TEXT,
+    created_at INTEGER NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS match_events (
+    id TEXT PRIMARY KEY,
+    match_id TEXT NOT NULL,
+    minute INTEGER NOT NULL,
+    event_type TEXT NOT NULL,
+    player_name TEXT,
+    description TEXT,
+    timestamp_video REAL,
+    confidence REAL DEFAULT 1.0,
+    created_at INTEGER NOT NULL,
+    FOREIGN KEY(match_id) REFERENCES football_matches(id)
+  );
+
+  CREATE TABLE IF NOT EXISTS commentary_scripts (
+    id TEXT PRIMARY KEY,
+    match_id TEXT NOT NULL,
+    language TEXT NOT NULL,
+    style TEXT NOT NULL,
+    hook TEXT,
+    segments_json TEXT NOT NULL,
+    audio_path TEXT,
+    created_at INTEGER NOT NULL,
+    FOREIGN KEY(match_id) REFERENCES football_matches(id)
+  );
+
+  CREATE TABLE IF NOT EXISTS publishing_packages (
+    id TEXT PRIMARY KEY,
+    target_id TEXT NOT NULL,
+    target_type TEXT NOT NULL,
+    primary_title TEXT NOT NULL,
+    alternative_titles_json TEXT,
+    description TEXT,
+    primary_keyword TEXT,
+    seo_keywords_json TEXT,
+    tags_json TEXT,
+    hashtags_json TEXT,
+    thumbnail_url TEXT,
+    thumbnail_type TEXT,
+    platform_recommendation TEXT,
+    aspect_ratio TEXT,
+    created_at INTEGER NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS provider_configs (
+    provider_id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    is_active INTEGER DEFAULT 1,
+    default_model TEXT NOT NULL,
+    api_key_encrypted TEXT,
+    api_base TEXT,
+    usage_count INTEGER DEFAULT 0,
+    last_latency_ms INTEGER DEFAULT 0,
+    status TEXT DEFAULT 'unknown',
+    updated_at INTEGER NOT NULL
+  );
 `);
+
+export interface FootballMatch {
+  id: string;
+  home_team: string;
+  away_team: string;
+  competition?: string;
+  match_date?: string;
+  scoreline?: string;
+  source_url?: string;
+  status: 'pending' | 'resolved' | 'failed';
+  verified: number;
+  metadata_json?: string;
+  created_at: number;
+}
+
+export interface MatchEvent {
+  id: string;
+  match_id: string;
+  minute: number;
+  event_type: 'goal' | 'assist' | 'card' | 'save' | 'substitution' | 'attack' | 'tactical';
+  player_name?: string;
+  description?: string;
+  timestamp_video?: number;
+  confidence?: number;
+  created_at: number;
+}
+
+export interface CommentaryScript {
+  id: string;
+  match_id: string;
+  language: string;
+  style: string;
+  hook?: string;
+  segments_json: string;
+  audio_path?: string;
+  created_at: number;
+}
+
+export interface PublishingPackage {
+  id: string;
+  target_id: string;
+  target_type: 'clip' | 'football';
+  primary_title: string;
+  alternative_titles_json: string;
+  description?: string;
+  primary_keyword?: string;
+  seo_keywords_json: string;
+  tags_json: string;
+  hashtags_json: string;
+  thumbnail_url?: string;
+  thumbnail_type?: 'ai' | 'frame';
+  platform_recommendation?: string;
+  aspect_ratio?: string;
+  created_at: number;
+}
+
+export interface ProviderConfig {
+  provider_id: string;
+  name: string;
+  is_active: number;
+  default_model: string;
+  api_key_encrypted?: string;
+  api_base?: string;
+  usage_count: number;
+  last_latency_ms: number;
+  status: string;
+  updated_at: number;
+}
 
 export interface Job {
   id: string;

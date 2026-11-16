@@ -3,36 +3,45 @@ import React, { useState } from 'react';
 interface StudioHubProps {
   onUploadClick: () => void;
   isUploading: boolean;
+  onYouTubeImport?: (url: string) => void;
+  onNavigateToFootball?: () => void;
 }
 
-export const StudioHub: React.FC<StudioHubProps> = ({ onUploadClick, isUploading }) => {
+export const StudioHub: React.FC<StudioHubProps> = ({
+  onUploadClick,
+  isUploading,
+  onYouTubeImport,
+  onNavigateToFootball,
+}) => {
   const [selectedRatio, setSelectedRatio] = useState<string>('9:16');
-  const [customRatio, setCustomRatio] = useState<string>('4:5');
-  const [isCustomRatio, setIsCustomRatio] = useState<boolean>(false);
   const [captionStyle, setCaptionStyle] = useState<string>('Hormozi');
-  const [captionBg, setCaptionBg] = useState<string>('Pure White Box');
-  const [aiModel, setAiModel] = useState<string>('groq');
-  const [userApiKey, setUserApiKey] = useState<string>('');
+  const [aiProvider, setAiProvider] = useState<string>('nvidia');
+  const [youtubeUrl, setYoutubeUrl] = useState<string>('');
 
-  const effectiveRatio = isCustomRatio ? customRatio : selectedRatio;
+  const aspectRatios = [
+    { id: '9:16', label: '9:16 Vertical', desc: 'TikTok, Reels, Shorts' },
+    { id: '16:9', label: '16:9 Landscape', desc: 'YouTube Standard' },
+    { id: '1:1', label: '1:1 Square', desc: 'Feed & Carousel' },
+    { id: '4:5', label: '4:5 Portrait', desc: 'Instagram Feed' },
+    { id: '3:4', label: '3:4 Frame', desc: 'Social Feeds' },
+    { id: '21:9', label: '21:9 Ultrawide', desc: 'Cinematic' },
+  ];
 
   return (
     <div
       style={{
         flex: 1,
-        backgroundColor: '#F7F5F0',
-        color: '#1C1C18',
-        padding: '64px 48px',
+        width: '100%',
+        backgroundColor: '#F5F4F0',
+        color: '#171717',
+        padding: '56px 32px',
         overflowY: 'auto',
-        fontFamily: "'Playfair Display', Georgia, serif",
-        minHeight: '100vh',
-        perspective: '1000px',
       }}
     >
-      {/* 3D Hero Section */}
+      {/* Editorial Hero Header */}
       <div
         style={{
-          maxWidth: '1000px',
+          maxWidth: '1080px',
           margin: '0 auto 48px auto',
           textAlign: 'center',
           display: 'flex',
@@ -45,313 +54,289 @@ export const StudioHub: React.FC<StudioHubProps> = ({ onUploadClick, isUploading
             fontSize: '11px',
             fontFamily: "'JetBrains Mono', monospace",
             fontWeight: 700,
-            letterSpacing: '0.12em',
-            color: '#059669',
-            backgroundColor: 'rgba(5, 150, 105, 0.08)',
+            letterSpacing: '0.14em',
+            color: '#C99E35',
+            backgroundColor: '#FFFFFF',
             padding: '6px 18px',
-            borderRadius: '30px',
-            border: '1px solid rgba(5, 150, 105, 0.2)',
-            marginBottom: '24px',
-            boxShadow: '0 4px 12px rgba(5, 150, 105, 0.1)',
+            borderRadius: '999px',
+            border: '1px solid #DFDDD5',
+            marginBottom: '20px',
+            boxShadow: '0 2px 6px rgba(0, 0, 0, 0.03)',
           }}
         >
-          ✨ AI-NATIVE VIDEO INTELLIGENCE
-
+          ✨ OPENCLIP AI · VIRAL CLIP FACTORY
         </div>
 
         <h1
           style={{
-            fontSize: '56px',
-            fontWeight: 700,
-            color: '#121212',
+            fontSize: '52px',
+            fontWeight: 800,
+            color: '#171717',
             margin: '0 0 16px 0',
-            lineHeight: 1.08,
+            lineHeight: 1.1,
             letterSpacing: '-0.03em',
           }}
         >
-          Instant Viral Cut & Subtitle Studio
+          Intelligent Video Studio & Viral Engine
         </h1>
 
         <p
           style={{
-            color: '#555',
-            fontSize: '18px',
-            fontFamily: "'Inter', sans-serif",
-            maxWidth: '740px',
-            margin: '0 0 36px 0',
+            color: '#62615D',
+            fontSize: '17px',
+            maxWidth: '720px',
+            margin: '0 0 32px 0',
             lineHeight: 1.6,
           }}
         >
-          Customize aspect ratios, burnt-in caption styles, and high-contrast white text backdrops before running AI video processing.
+          Transform long-form podcasts, educational videos, and matches into high-retention short clips with smart reframing, Hormozi captions, and explainable virality scores.
         </p>
 
-        {/* Advanced Pre-Upload Presets Card */}
+        {/* Dual Workflow Switcher Buttons */}
+        <div style={{ display: 'flex', gap: '14px', marginBottom: '40px' }}>
+          <button
+            onClick={onUploadClick}
+            disabled={isUploading}
+            style={{
+              backgroundColor: '#171717',
+              color: '#FFFFFF',
+              fontWeight: 700,
+              fontSize: '14px',
+              padding: '12px 28px',
+              borderRadius: '8px',
+              border: 'none',
+              cursor: isUploading ? 'not-allowed' : 'pointer',
+              boxShadow: '0 4px 14px rgba(0, 0, 0, 0.1)',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '8px',
+            }}
+          >
+            <span style={{ color: '#C99E35' }}>⚡</span> {isUploading ? 'Uploading Video...' : 'Upload Video File'}
+          </button>
+
+          {onNavigateToFootball && (
+            <button
+              onClick={onNavigateToFootball}
+              style={{
+                backgroundColor: '#FFFFFF',
+                color: '#171717',
+                fontWeight: 600,
+                fontSize: '14px',
+                padding: '12px 28px',
+                borderRadius: '8px',
+                border: '1px solid #DFDDD5',
+                cursor: 'pointer',
+                display: 'flex',
+                alignItems: 'center',
+                gap: '8px',
+                boxShadow: '0 2px 6px rgba(0, 0, 0, 0.03)',
+              }}
+            >
+              <span>⚽</span> Switch to Football Studio
+            </button>
+          )}
+        </div>
+      </div>
+
+      {/* Main Studio Controls Grid */}
+      <div
+        style={{
+          maxWidth: '1080px',
+          margin: '0 auto',
+          display: 'grid',
+          gridTemplateColumns: '1.2fr 1fr',
+          gap: '32px',
+        }}
+      >
+        {/* Left Column: Input Sources (Upload / YouTube) */}
         <div
           style={{
-            width: '100%',
-            maxWidth: '780px',
-            backgroundColor: '#FAF8F3',
-            border: '1px solid #D8D2C2',
-            borderRadius: '24px',
-            padding: '28px 36px',
-            marginBottom: '28px',
-            boxShadow: '0 12px 32px rgba(0,0,0,0.04)',
-            display: 'flex',
-            flexDirection: 'column',
-            gap: '24px',
-            textAlign: 'left',
+            backgroundColor: '#FFFFFF',
+            border: '1px solid #DFDDD5',
+            borderRadius: '16px',
+            padding: '32px',
+            boxShadow: '0 4px 20px rgba(0, 0, 0, 0.04)',
           }}
         >
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-            <div style={{ fontSize: '12px', fontFamily: "'Inter', sans-serif", fontWeight: 700, letterSpacing: '0.08em', color: '#121212', textTransform: 'uppercase' }}>
-              ⚙️ ADVANCED PRE-UPLOAD PRESETS
-            </div>
-            <span style={{ fontSize: '11px', fontFamily: "'JetBrains Mono', monospace", color: '#059669', fontWeight: 600 }}>
-              AI AUTO-RECOLOR READY
-            </span>
-          </div>
+          <h2 style={{ fontSize: '18px', fontWeight: 700, color: '#171717', margin: '0 0 20px 0' }}>
+            Media Ingestion
+          </h2>
 
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '20px', fontFamily: "'Inter', sans-serif" }}>
-            {/* Target & Custom Aspect Ratio */}
-            <div>
-              <label style={{ fontSize: '11px', fontWeight: 700, color: '#666', display: 'block', marginBottom: '8px' }}>
-                ASPECT RATIO
-              </label>
-              <div style={{ display: 'flex', gap: '6px', marginBottom: '8px' }}>
-                {['9:16', '16:9', '1:1'].map((ratio) => (
-                  <button
-                    key={ratio}
-                    onClick={() => {
-                      setSelectedRatio(ratio);
-                      setIsCustomRatio(false);
-                    }}
-                    style={{
-                      flex: 1,
-                      padding: '8px 0',
-                      borderRadius: '8px',
-                      fontSize: '12px',
-                      fontWeight: 600,
-                      border: (!isCustomRatio && selectedRatio === ratio) ? '1px solid #121212' : '1px solid #D8D2C2',
-                      backgroundColor: (!isCustomRatio && selectedRatio === ratio) ? '#121212' : '#FFF',
-                      color: (!isCustomRatio && selectedRatio === ratio) ? '#FFF' : '#444',
-                      cursor: 'pointer',
-                    }}
-                  >
-                    {ratio}
-                  </button>
-                ))}
-              </div>
-              
-              {/* Custom Ratio Toggle & Input */}
-              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                <input
-                  type="checkbox"
-                  id="customRatioToggle"
-                  checked={isCustomRatio}
-                  onChange={(e) => setIsCustomRatio(e.target.checked)}
-                  style={{ cursor: 'pointer' }}
-                />
-                <label htmlFor="customRatioToggle" style={{ fontSize: '11px', fontWeight: 600, color: '#444', cursor: 'pointer' }}>
-                  Custom Ratio:
-                </label>
-                {isCustomRatio && (
-                  <input
-                    type="text"
-                    value={customRatio}
-                    onChange={(e) => setCustomRatio(e.target.value)}
-                    placeholder="e.g. 4:5 or 21:9"
-                    style={{
-                      width: '80px',
-                      padding: '4px 8px',
-                      borderRadius: '6px',
-                      border: '1px solid #D8D2C2',
-                      fontSize: '11px',
-                      fontFamily: "'JetBrains Mono', monospace",
-                      fontWeight: 600,
-                    }}
-                  />
-                )}
-              </div>
-            </div>
-
-            {/* Caption Style Dropdown */}
-            <div>
-              <label style={{ fontSize: '11px', fontWeight: 700, color: '#666', display: 'block', marginBottom: '8px' }}>
-                CAPTION ANIMATION
-              </label>
-              <select
-                value={captionStyle}
-                onChange={(e) => setCaptionStyle(e.target.value)}
-                style={{
-                  width: '100%',
-                  padding: '9px 12px',
-                  borderRadius: '10px',
-                  border: '1px solid #D8D2C2',
-                  backgroundColor: '#FFF',
-                  fontSize: '12px',
-                  fontWeight: 600,
-                  color: '#121212',
-                  boxShadow: '0 2px 6px rgba(0,0,0,0.02)',
-                  cursor: 'pointer',
-                }}
-              >
-                <option value="Hormozi">⚡ Alex Hormozi (Bold Highlight)</option>
-                <option value="MrBeast">🔥 MrBeast Pop (Yellow/White)</option>
-                <option value="Cinematic Luxury">💎 Cinematic Luxury (Playfair Serif)</option>
-                <option value="TikTok Dynamic">📱 TikTok Kinetic (Word Zoom)</option>
-                <option value="Clean Minimal">✨ Clean Minimal Fade</option>
-              </select>
-            </div>
-
-            {/* Caption Background & Glow */}
-            <div>
-              <label style={{ fontSize: '11px', fontWeight: 700, color: '#666', display: 'block', marginBottom: '8px' }}>
-                CAPTION BACKGROUND
-              </label>
-              <select
-                value={captionBg}
-                onChange={(e) => setCaptionBg(e.target.value)}
-                style={{
-                  width: '100%',
-                  padding: '9px 12px',
-                  borderRadius: '10px',
-                  border: '1px solid #D8D2C2',
-                  backgroundColor: '#FFF',
-                  fontSize: '12px',
-                  fontWeight: 600,
-                  color: '#121212',
-                  boxShadow: '0 2px 6px rgba(0,0,0,0.02)',
-                  cursor: 'pointer',
-                }}
-              >
-                <option value="Pure White Box">⚪ Pure White Solid Box</option>
-                <option value="Frosted Glass">🥛 Frosted Glassmorphic</option>
-                <option value="Neon Cyber Glow">🌟 Neon Cyber Glow</option>
-                <option value="Dark Obsidian Box">⬛ Dark Obsidian Box</option>
-                <option value="Transparent Text">🚫 Transparent Clean Text</option>
-              </select>
-            </div>
-          </div>
-
-          {/* AI Model & Custom API Key */}
-          <div style={{ borderTop: '1px solid #E2DEC5', paddingTop: '16px', display: 'grid', gridTemplateColumns: '1fr 2fr', gap: '20px', fontFamily: "'Inter', sans-serif" }}>
-            <div>
-              <label style={{ fontSize: '11px', fontWeight: 700, color: '#666', display: 'block', marginBottom: '8px' }}>
-                AI MODEL ENGINE
-              </label>
-              <select
-                value={aiModel}
-                onChange={(e) => setAiModel(e.target.value)}
-                style={{
-                  width: '100%',
-                  padding: '9px 12px',
-                  borderRadius: '10px',
-                  border: '1px solid #D8D2C2',
-                  backgroundColor: '#FFF',
-                  fontSize: '12px',
-                  fontWeight: 600,
-                  color: '#121212',
-                }}
-              >
-                <option value="groq">⚡ Groq Llama 3 70B (Sub-Second High Speed)</option>
-                <option value="openai">🧠 OpenAI GPT-4o (Deep Reasoning)</option>
-                <option value="gemini">✨ Google Gemini 1.5 Pro (Multimodal)</option>
-                <option value="anthropic">🎭 Claude 3.5 Sonnet (Creative Hooks)</option>
-              </select>
-            </div>
-
-            <div>
-              <label style={{ fontSize: '11px', fontWeight: 700, color: '#666', display: 'block', marginBottom: '8px' }}>
-                CUSTOM API KEY (OPTIONAL - MULTI-KEY FAILOVER ACTIVE)
-              </label>
+          {/* YouTube Link Ingestion */}
+          <div style={{ marginBottom: '28px' }}>
+            <label style={{ display: 'block', fontSize: '11px', fontFamily: "'JetBrains Mono', monospace", color: '#898781', marginBottom: '8px' }}>
+              IMPORT YOUTUBE URL (yt-dlp)
+            </label>
+            <div style={{ display: 'flex', gap: '8px' }}>
               <input
-                type="password"
-                value={userApiKey}
-                onChange={(e) => setUserApiKey(e.target.value)}
-                placeholder="Enter custom API key..."
+                type="text"
+                value={youtubeUrl}
+                onChange={(e) => setYoutubeUrl(e.target.value)}
+                placeholder="https://www.youtube.com/watch?v=..."
                 style={{
-                  width: '100%',
-                  padding: '9px 12px',
-                  borderRadius: '10px',
-                  border: '1px solid #D8D2C2',
-                  backgroundColor: '#FFF',
-                  fontSize: '12px',
-                  fontFamily: "'JetBrains Mono', monospace",
-                  fontWeight: 500,
-                  color: '#121212',
+                  flex: 1,
+                  backgroundColor: '#F9F9F8',
+                  border: '1px solid #DFDDD5',
+                  borderRadius: '8px',
+                  padding: '12px 14px',
+                  color: '#171717',
+                  fontSize: '13px',
+                  outline: 'none',
                 }}
               />
+              <button
+                onClick={() => onYouTubeImport && onYouTubeImport(youtubeUrl)}
+                style={{
+                  backgroundColor: '#171717',
+                  color: '#FFFFFF',
+                  padding: '0 18px',
+                  borderRadius: '8px',
+                  border: 'none',
+                  fontSize: '13px',
+                  fontWeight: 600,
+                  cursor: 'pointer',
+                }}
+              >
+                Import
+              </button>
+            </div>
+          </div>
+
+          {/* Drag & Drop File Zone */}
+          <div
+            onClick={onUploadClick}
+            style={{
+              border: '2px dashed #DFDDD5',
+              borderRadius: '12px',
+              padding: '48px 24px',
+              textAlign: 'center',
+              backgroundColor: '#F9F9F8',
+              cursor: 'pointer',
+              transition: 'border-color 0.2s ease',
+            }}
+          >
+            <div style={{ fontSize: '36px', marginBottom: '12px' }}>📁</div>
+            <div style={{ fontSize: '15px', fontWeight: 600, color: '#171717', marginBottom: '6px' }}>
+              Drop video file here or click to browse
+            </div>
+            <div style={{ fontSize: '12px', color: '#62615D' }}>
+              MP4, MOV, MKV, WebM up to 4GB · Auto 16kHz speech extraction
             </div>
           </div>
         </div>
 
-        {/* 3D Glassmorphic Dropzone CTA */}
+        {/* Right Column: Processing Presets & AI Options */}
         <div
-          onClick={onUploadClick}
           style={{
-            width: '100%',
-            maxWidth: '780px',
-            backgroundColor: 'rgba(250, 248, 243, 0.75)',
-            backdropFilter: 'blur(24px)',
-            WebkitBackdropFilter: 'blur(24px)',
-            border: '2px dashed #121212',
-            borderRadius: '32px',
-            padding: '56px 40px',
-            cursor: 'pointer',
-            boxShadow: '0 20px 50px rgba(0,0,0,0.08), inset 0 0 30px rgba(255,255,255,0.8)',
+            backgroundColor: '#FFFFFF',
+            border: '1px solid #DFDDD5',
+            borderRadius: '16px',
+            padding: '32px',
             display: 'flex',
             flexDirection: 'column',
-            alignItems: 'center',
-            gap: '20px',
-            transform: 'rotateX(2deg)',
-            transition: 'all 0.3s ease',
+            gap: '24px',
+            boxShadow: '0 4px 20px rgba(0, 0, 0, 0.04)',
           }}
         >
-          <div
-            style={{
-              width: '64px',
-              height: '64px',
-              backgroundColor: '#121212',
-              color: '#FFF',
-              borderRadius: '20px',
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              fontSize: '28px',
-              boxShadow: '0 8px 24px rgba(0,0,0,0.2)',
-            }}
-          >
-            🎬
-          </div>
+          <h2 style={{ fontSize: '18px', fontWeight: 700, color: '#171717', margin: 0 }}>
+            Studio Presets
+          </h2>
 
+          {/* Aspect Ratio Selection */}
           <div>
-            <div style={{ fontSize: '22px', fontWeight: 700, color: '#121212' }}>
-              {isUploading ? 'Analyzing Video & Extracting Viral Clips...' : 'Upload Video File to Process'}
-            </div>
-            <div style={{ fontSize: '14px', fontFamily: "'Inter', sans-serif", color: '#666', marginTop: '8px' }}>
-              Selected Preset: {effectiveRatio} • {captionStyle} • {captionBg}
+            <label style={{ display: 'block', fontSize: '11px', fontFamily: "'JetBrains Mono', monospace", color: '#898781', marginBottom: '8px' }}>
+              TARGET ASPECT RATIO (SMART REFRAME)
+            </label>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '8px' }}>
+              {aspectRatios.map((r) => (
+                <button
+                  key={r.id}
+                  onClick={() => setSelectedRatio(r.id)}
+                  style={{
+                    padding: '10px 8px',
+                    borderRadius: '8px',
+                    fontSize: '12px',
+                    fontWeight: 600,
+                    cursor: 'pointer',
+                    backgroundColor: selectedRatio === r.id ? 'rgba(201, 158, 53, 0.1)' : '#F9F9F8',
+                    color: selectedRatio === r.id ? '#C99E35' : '#62615D',
+                    border: selectedRatio === r.id ? '1.5px solid #C99E35' : '1px solid #DFDDD5',
+                    textAlign: 'center',
+                  }}
+                >
+                  <div style={{ fontWeight: 700 }}>{r.id}</div>
+                  <div style={{ fontSize: '10px', color: '#898781', fontWeight: 400, marginTop: '2px' }}>
+                    {r.id === '9:16' ? 'Vertical' : r.id === '16:9' ? 'Wide' : 'Square'}
+                  </div>
+                </button>
+              ))}
             </div>
           </div>
 
-          <button
-            style={{
-              backgroundColor: '#121212',
-              color: '#FAF8F3',
-              padding: '14px 36px',
-              borderRadius: '14px',
-              fontFamily: "'Inter', sans-serif",
-              fontWeight: 700,
-              fontSize: '15px',
-              border: 'none',
-              marginTop: '12px',
-              cursor: 'pointer',
-              boxShadow: '0 6px 20px rgba(0,0,0,0.15)',
-            }}
-          >
-            {isUploading ? 'Executing Analysis DAG...' : '+ Select Video File'}
-          </button>
+          {/* Caption Style */}
+          <div>
+            <label style={{ display: 'block', fontSize: '11px', fontFamily: "'JetBrains Mono', monospace", color: '#898781', marginBottom: '8px' }}>
+              BURNT-IN CAPTION STYLE
+            </label>
+            <div style={{ display: 'flex', gap: '8px' }}>
+              {['Hormozi', 'Minimalist', 'Banner'].map((s) => (
+                <button
+                  key={s}
+                  onClick={() => setCaptionStyle(s)}
+                  style={{
+                    flex: 1,
+                    padding: '10px 12px',
+                    borderRadius: '8px',
+                    fontSize: '12px',
+                    fontWeight: 600,
+                    cursor: 'pointer',
+                    backgroundColor: captionStyle === s ? 'rgba(201, 158, 53, 0.1)' : '#F9F9F8',
+                    color: captionStyle === s ? '#C99E35' : '#62615D',
+                    border: captionStyle === s ? '1.5px solid #C99E35' : '1px solid #DFDDD5',
+                  }}
+                >
+                  {s === 'Hormozi' ? '🟡 Hormozi Amber' : s === 'Minimalist' ? '⚪ Minimalist' : '⬛ Subtitle Bar'}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* AI Reasoning Provider */}
+          <div>
+            <label style={{ display: 'block', fontSize: '11px', fontFamily: "'JetBrains Mono', monospace", color: '#898781', marginBottom: '8px' }}>
+              CREATIVE DIRECTOR REASONING MODEL
+            </label>
+            <div style={{ display: 'flex', gap: '8px' }}>
+              {[
+                { id: 'nvidia', label: 'NVIDIA NIM' },
+                { id: 'groq', label: 'Groq LPU' },
+                { id: 'gemini', label: 'Google Gemini' },
+              ].map((p) => (
+                <button
+                  key={p.id}
+                  onClick={() => setAiProvider(p.id)}
+                  style={{
+                    flex: 1,
+                    padding: '10px 12px',
+                    borderRadius: '8px',
+                    fontSize: '12px',
+                    fontWeight: 600,
+                    cursor: 'pointer',
+                    backgroundColor: aiProvider === p.id ? '#171717' : '#F9F9F8',
+                    color: aiProvider === p.id ? '#FFFFFF' : '#62615D',
+                    border: aiProvider === p.id ? '1px solid #171717' : '1px solid #DFDDD5',
+                  }}
+                >
+                  {p.label}
+                </button>
+              ))}
+            </div>
+          </div>
         </div>
       </div>
     </div>
   );
 };
+
+export default StudioHub;

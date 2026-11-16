@@ -28,7 +28,7 @@ const upload = multer({
 
 
 import { HardwareDetector } from '../services/hardwareDetector';
-import { VectorStore } from '../services/VectorStore';
+import { VectorStore } from '../services/vectorStore';
 
 /**
  * GET /api/system/diagnostics

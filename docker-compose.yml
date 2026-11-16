@@ -1,0 +1,41 @@
+version: '3.8'
+
+services:
+  openclip-app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: openclip-studio
+    ports:
+      - "5001:5001"
+      - "5173:5173"
+    environment:
+      - PORT=5001
+      - NODE_ENV=production
+      - GROQ_API_KEY=${GROQ_API_KEY}
+      - NVIDIA_API_KEY=${NVIDIA_API_KEY}
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - STORAGE_DIR=/app/storage
+    volumes:
+      - openclip_storage:/app/storage
+      - ./backend/src:/app/backend/src
+    restart: unless-stopped
+
+  openclip-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: openclip-worker
+    command: ["python", "-m", "openclip_engine.cli.main", "worker"]
+    environment:
+      - GROQ_API_KEY=${GROQ_API_KEY}
+      - NVIDIA_API_KEY=${NVIDIA_API_KEY}
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - STORAGE_DIR=/app/storage
+    volumes:
+      - openclip_storage:/app/storage
+    restart: unless-stopped
+
+volumes:
+  openclip_storage:
+    driver: local

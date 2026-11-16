@@ -1,5 +1,5 @@
 import { encryptText, decryptText } from '../src/utils/security';
-import { VectorStore } from '../src/services/VectorStore';
+import { VectorStore } from '../src/services/vectorStore';
 import { SemanticEngine } from '../src/services/SemanticEngine';
 import { HardwareDetector } from '../src/services/hardwareDetector';
 import { DependencyRegistry } from '../src/services/DependencyRegistry';

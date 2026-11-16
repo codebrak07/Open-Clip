@@ -1,4 +1,4 @@
-import { VectorStore, ChunkVector } from './VectorStore';
+import { VectorStore, ChunkVector } from './vectorStore';
 import { Logger } from '../utils/Logger';
 
 export interface SemanticSearchResult {
