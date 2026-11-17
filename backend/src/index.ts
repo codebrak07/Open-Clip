@@ -29,6 +29,9 @@ app.get('/', (req, res) => {
 
 // Serve rendered clips and assets
 app.use('/outputs', express.static(OUTPUTS_DIR));
+app.use('/outputs', express.static(path.resolve(__dirname, '../storage/outputs')));
+app.use('/uploads', express.static(UPLOADS_DIR));
+app.use('/uploads', express.static(path.resolve(__dirname, '../storage/uploads')));
 
 // API router
 app.use('/api/v1', v1Router);

@@ -29,6 +29,19 @@ export function App() {
   useEffect(() => {
     if (!activeJobId) return;
 
+    // Fetch job details to synchronize source video stream
+    fetch(`${API_BASE_URL}/api/jobs/${activeJobId}`)
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (data?.job?.video_url) {
+          const fullUrl = data.job.video_url.startsWith('http')
+            ? data.job.video_url
+            : `${API_BASE_URL}${data.job.video_url}`;
+          setSourceVideoUrl(fullUrl);
+        }
+      })
+      .catch(() => {});
+
     const interval = setInterval(async () => {
       try {
         const clipRes = await fetch(`${API_BASE_URL}/api/jobs/${activeJobId}/clips`);
@@ -38,6 +51,12 @@ export function App() {
           setClips(fetchedClips);
           if (!activeClip && fetchedClips.length > 0) {
             previewClip(fetchedClips[0]);
+            if (fetchedClips[0].video_url) {
+              const fullUrl = fetchedClips[0].video_url.startsWith('http')
+                ? fetchedClips[0].video_url
+                : `${API_BASE_URL}${fetchedClips[0].video_url}`;
+              setSourceVideoUrl(fullUrl);
+            }
           }
         }
       } catch (err) {
@@ -46,7 +65,7 @@ export function App() {
     }, 1500);
 
     return () => clearInterval(interval);
-  }, [activeJobId, activeClip, previewClip]);
+  }, [activeJobId, activeClip, previewClip, setSourceVideoUrl]);
 
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -174,11 +193,17 @@ export function App() {
           isUploading={isUploading}
           onNavigateToFootball={() => setActiveView('football-studio')}
           onOpenDirectorWorkspace={(jobId) => {
-            if (jobId) setActiveJobId(jobId);
+            if (jobId) {
+              setActiveJobId(jobId);
+              setSourceVideoUrl(`${API_BASE_URL}/api/jobs/${jobId}/video`);
+            }
             setActiveView('workspace');
           }}
           onYouTubeImport={(jobId, importedClips) => {
-            if (jobId) setActiveJobId(jobId);
+            if (jobId) {
+              setActiveJobId(jobId);
+              setSourceVideoUrl(`${API_BASE_URL}/api/jobs/${jobId}/video`);
+            }
             if (importedClips && importedClips.length > 0) {
               setClips(importedClips);
               if (!activeClip) {

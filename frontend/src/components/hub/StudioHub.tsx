@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { API_BASE_URL } from '../../config';
 import type { ClipData } from '../workspace/ClipReviewCard';
+import { usePlaybackStore } from '../../store/usePlaybackStore';
 
 interface StudioHubProps {
   onUploadClick: () => void;
@@ -136,6 +137,13 @@ export const StudioHub: React.FC<StudioHubProps> = ({
         setIngestionState('done');
         setStatusMessage('✓ Work is done! 3 viral clips extracted');
 
+        // Immediately update playback store so Director Workspace is hot and ready to play
+        const streamUrl = `${API_BASE_URL}/api/jobs/${jobId}/video`;
+        usePlaybackStore.getState().setSourceVideoUrl(streamUrl);
+        if (clips.length > 0) {
+          usePlaybackStore.getState().previewClip(clips[0]);
+        }
+
         if (onYouTubeImport) {
           onYouTubeImport(jobId, clips);
         }
@@ -178,6 +186,12 @@ export const StudioHub: React.FC<StudioHubProps> = ({
       setProgressPercent(100);
       setIngestionState('done');
       setStatusMessage('✓ Work is done! 3 viral clips extracted');
+
+      const fallbackStream = `${API_BASE_URL}/api/jobs/${fallbackJobId}/video`;
+      usePlaybackStore.getState().setSourceVideoUrl(fallbackStream);
+      if (fallbackClips.length > 0) {
+        usePlaybackStore.getState().previewClip(fallbackClips[0]);
+      }
 
       if (onYouTubeImport) {
         onYouTubeImport(fallbackJobId, fallbackClips);
@@ -691,7 +705,17 @@ export const StudioHub: React.FC<StudioHubProps> = ({
                   {/* Primary CTA Button: Open in Director Workspace */}
                   <div style={{ display: 'flex', gap: '10px', marginTop: '8px' }}>
                     <button
-                      onClick={() => onOpenDirectorWorkspace && onOpenDirectorWorkspace(createdJobId || undefined)}
+                      onClick={() => {
+                        if (createdJobId) {
+                          usePlaybackStore.getState().setSourceVideoUrl(`${API_BASE_URL}/api/jobs/${createdJobId}/video`);
+                          if (extractedClips.length > 0) {
+                            usePlaybackStore.getState().previewClip(extractedClips[0]);
+                          }
+                        }
+                        if (onOpenDirectorWorkspace) {
+                          onOpenDirectorWorkspace(createdJobId || undefined);
+                        }
+                      }}
                       style={{
                         flex: 1,
                         backgroundColor: '#171717',

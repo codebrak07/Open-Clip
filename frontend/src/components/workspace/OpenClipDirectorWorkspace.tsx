@@ -26,8 +26,18 @@ export const OpenClipDirectorWorkspace: React.FC<EditorialWorkspaceProps> = ({
   const [selectedFormat, setSelectedFormat] = useState('TIKTOK');
   const [waveformZoom, setWaveformZoom] = useState(50);
 
+  React.useEffect(() => {
+    if (!activeClip && clips.length > 0) {
+      previewClip(clips[0]);
+    }
+  }, [activeClip, clips, previewClip]);
+
   const confidenceScore = activeClip ? activeClip.score : 88;
-  const rawVideoSrc = activeClip?.video_url || sourceVideoUrl;
+  const firstClip = clips.length > 0 ? clips[0] : null;
+  const inferredJobId = firstClip?.id?.includes('_clip_') ? firstClip.id.split('_clip_')[0] : null;
+  const fallbackJobStream = inferredJobId ? `${API_BASE_URL}/api/jobs/${inferredJobId}/video` : undefined;
+
+  const rawVideoSrc = activeClip?.video_url || sourceVideoUrl || fallbackJobStream;
   const currentVideoSrc = rawVideoSrc
     ? rawVideoSrc.startsWith('blob:') || rawVideoSrc.startsWith('http')
       ? rawVideoSrc
@@ -173,7 +183,27 @@ export const OpenClipDirectorWorkspace: React.FC<EditorialWorkspaceProps> = ({
                   style={{ width: '100%', height: '100%', objectFit: 'contain' }}
                   controls
                   autoPlay
+                  playsInline
+                  onLoadedMetadata={() => {
+                    if (videoRef.current && activeClip) {
+                      videoRef.current.currentTime = activeClip.start_time;
+                      videoRef.current.play().catch(() => {});
+                    }
+                  }}
+                  onTimeUpdate={() => {
+                    if (videoRef.current && activeClip) {
+                      if (videoRef.current.currentTime >= activeClip.end_time) {
+                        videoRef.current.currentTime = activeClip.start_time;
+                        videoRef.current.play().catch(() => {});
+                      }
+                    }
+                  }}
                 />
+              ) : clips.length > 0 ? (
+                <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', color: '#888', gap: '12px', padding: '40px' }}>
+                  <span style={{ fontSize: '32px' }}>⚡</span>
+                  <p style={{ fontFamily: "'Inter', sans-serif", fontSize: '14px', color: '#FAF8F3' }}>Synchronizing video stream...</p>
+                </div>
               ) : (
                 <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', color: '#888', gap: '12px', padding: '40px' }}>
                   <span style={{ fontSize: '32px' }}>🎬</span>

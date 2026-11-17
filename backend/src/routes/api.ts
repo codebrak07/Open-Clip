@@ -189,8 +189,17 @@ router.post('/jobs/youtube/import', async (req, res) => {
       'High retention conclusion and audience engagement trigger for shares and comments.'
     );
 
-    // Query back formatted clips
+    // Query back formatted clips with fallback to source video stream for immediate director preview
     const clips = db.prepare('SELECT * FROM clips WHERE job_id = ? ORDER BY score DESC').all(jobId) as Clip[];
+    const videoStreamUrl = `/api/jobs/${jobId}/video`;
+
+    const formattedClips = clips.map(c => ({
+      ...c,
+      video_url: c.output_path && fs.existsSync(c.output_path)
+        ? `/outputs/${path.basename(c.output_path)}`
+        : videoStreamUrl,
+      subtitles_url: c.subtitles_path ? `/outputs/${path.basename(c.subtitles_path)}` : null,
+    }));
 
     res.status(201).json({
       success: true,
@@ -198,10 +207,46 @@ router.post('/jobs/youtube/import', async (req, res) => {
       jobId,
       status: 'completed',
       metadata: meta,
-      clips,
+      video_url: videoStreamUrl,
+      clips: formattedClips,
     });
   } catch (err: any) {
     console.error('[YouTube Import Error]', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * GET /api/jobs/:id/video
+ * High-performance video streaming endpoint with HTTP Range support for scrub & cut playback
+ */
+router.get('/jobs/:id/video', (req, res) => {
+  try {
+    const { id } = req.params;
+    const job = db.prepare('SELECT video_path FROM jobs WHERE id = ?').get(id) as Job | undefined;
+    if (!job || !job.video_path) {
+      return res.status(404).json({ error: 'Video file not registered for this job.' });
+    }
+
+    const resolved = path.resolve(job.video_path);
+    if (fs.existsSync(resolved)) {
+      return res.sendFile(resolved);
+    }
+
+    // Secondary path search in storage/uploads and uploads directories
+    const filename = path.basename(job.video_path);
+    const storagePath = path.resolve(__dirname, '../../storage/uploads', filename);
+    if (fs.existsSync(storagePath)) {
+      return res.sendFile(storagePath);
+    }
+
+    const uploadsPath = path.resolve(__dirname, '../../uploads', filename);
+    if (fs.existsSync(uploadsPath)) {
+      return res.sendFile(uploadsPath);
+    }
+
+    return res.status(404).json({ error: 'Video file not found on disk.' });
+  } catch (err: any) {
     res.status(500).json({ error: err.message });
   }
 });
@@ -282,6 +327,7 @@ router.get('/jobs/:id', (req, res) => {
     res.json({
       job: {
         ...job,
+        video_url: job.video_path ? `/api/jobs/${id}/video` : null,
         metadata: parsedMeta,
       },
       logs,
@@ -297,11 +343,16 @@ router.get('/jobs/:id', (req, res) => {
 router.get('/jobs/:id/clips', (req, res) => {
   try {
     const { id } = req.params;
+    const job = db.prepare('SELECT video_path FROM jobs WHERE id = ?').get(id) as Job | undefined;
+    const defaultVideoUrl = job?.video_path ? `/api/jobs/${id}/video` : null;
+
     const clips = db.prepare('SELECT * FROM clips WHERE job_id = ? ORDER BY score DESC').all(id) as Clip[];
     
     const formattedClips = clips.map(c => ({
       ...c,
-      video_url: c.output_path ? `/outputs/${path.basename(c.output_path)}` : null,
+      video_url: c.output_path && fs.existsSync(c.output_path)
+        ? `/outputs/${path.basename(c.output_path)}`
+        : defaultVideoUrl,
       subtitles_url: c.subtitles_path ? `/outputs/${path.basename(c.subtitles_path)}` : null,
     }));
 
