@@ -6,9 +6,18 @@ import { PYTHON_PATH } from '../config';
 export class PythonEngineBridge {
   private static pythonEngineDir = path.resolve(__dirname, '../../python-engine');
 
+  private static resolvePythonBin(): string {
+    const venvPython = path.join(this.pythonEngineDir, '.venv', 'bin', 'python');
+    if (fs.existsSync(venvPython)) {
+      return venvPython;
+    }
+    return PYTHON_PATH;
+  }
+
   public static async runCommand(args: string[]): Promise<any> {
+    const pythonBin = this.resolvePythonBin();
     return new Promise((resolve, reject) => {
-      const pythonProcess = spawn(PYTHON_PATH, ['-m', 'openclip_engine.cli.main', ...args], {
+      const pythonProcess = spawn(pythonBin, ['-m', 'openclip_engine.cli.main', ...args], {
         cwd: this.pythonEngineDir,
         env: {
           ...process.env,
@@ -104,6 +113,24 @@ export class PythonEngineBridge {
       }
     }
     return '';
+  }
+
+  public static async extractYouTubeClips(url: string, jobId: string, clipCount: number = 5): Promise<{
+    metadata: any;
+    clips: Array<{ index: number; id: string; start_time: number; end_time: number; output_path: string; size_bytes: number }>;
+  }> {
+    const res = await this.runCommand([
+      'extract-clips',
+      url,
+      '--job-id',
+      jobId,
+      '--clip-count',
+      String(clipCount),
+    ]);
+    if (res && Array.isArray(res.clips) && res.clips.length > 0) {
+      return res;
+    }
+    throw new Error(`Failed to extract real YouTube clips: ${JSON.stringify(res)}`);
   }
 
   public static async runDoctor(): Promise<any> {

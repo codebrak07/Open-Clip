@@ -48,4 +48,8 @@ backend/outputs/
 backend/artifacts_cache/
 backend/storage/
 storage/
+.venv/
+**/.venv/
+__pycache__/
+**/__pycache__/
 artifacts_cache/

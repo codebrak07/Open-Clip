@@ -126,11 +126,10 @@ router.post('/jobs/youtube/import', async (req, res) => {
     const jobId = 'job_' + Date.now();
     const now = Date.now();
 
-    // 1. Fast metadata inspection via Python engine
-    const meta = await PythonEngineBridge.inspectYouTube(url);
-
-    // 2. Optimized stream download / synthetic media pipeline via Python
-    const videoPath = await PythonEngineBridge.downloadYouTube(url, jobId);
+    // 1. Extract real HD H.264/AAC MP4 clips in parallel directly from YouTube CDN via Python engine
+    const extracted = await PythonEngineBridge.extractYouTubeClips(url, jobId, clipCount);
+    const meta = extracted.metadata || {};
+    const primaryVideoPath = extracted.clips[0]?.output_path || null;
 
     const jobMeta = {
       sourceUrl: url,
@@ -141,24 +140,24 @@ router.post('/jobs/youtube/import', async (req, res) => {
       aspectRatio,
       captionStyle,
       provider,
-      clipCount,
+      clipCount: extracted.clips.length,
     };
 
-    // 3. Insert job record into SQLite
+    // 2. Insert job record into SQLite
     const stmt = db.prepare(`
       INSERT INTO jobs (id, status, current_stage, video_path, duration, metadata, created_at, updated_at)
       VALUES (?, 'completed', 'completed', ?, ?, ?, ?, ?)
     `);
-    stmt.run(jobId, videoPath || null, meta.duration || 180, JSON.stringify(jobMeta), now, now);
+    stmt.run(jobId, primaryVideoPath, meta.duration || 180, JSON.stringify(jobMeta), now, now);
 
-    // 4. Insert log
+    // 3. Insert log
     const logStmt = db.prepare(`
       INSERT INTO job_logs (job_id, stage, message, level, timestamp)
       VALUES (?, 'youtube_import', ?, 'info', ?)
     `);
-    logStmt.run(jobId, `Video loaded and ${clipCount} viral clips generated via Python engine`, now);
+    logStmt.run(jobId, `Extracted ${extracted.clips.length} real HD clips from "${jobMeta.title}" via Python engine`, now);
 
-    // 5. Dynamic generation of exactly the requested number of viral clips
+    // 4. Persist all real extracted clips with their standalone MP4 output_path
     const candidateTemplates = [
       { title: '🔥 High-Retention Viral Hook', rationale: 'Immediate attention spike with question setup and curiosity gap.' },
       { title: '⚡ Key Story Climax & Twist', rationale: 'Narrative turning point with high retention velocity and completion likelihood.' },
@@ -172,36 +171,31 @@ router.post('/jobs/youtube/import', async (req, res) => {
       { title: '📣 Final Warning & Challenge', rationale: 'Direct-to-camera audience challenge driving rewatch loop frequency.' },
     ];
 
-    const totalDuration = meta.duration || 180;
-    const intervalStep = Math.max(12, Math.floor(totalDuration / (clipCount + 1)));
-
     const insertClip = db.prepare(`
-      INSERT INTO clips (id, job_id, start_time, end_time, score, title, hook_rationale, render_status)
-      VALUES (?, ?, ?, ?, ?, ?, ?, 'completed')
+      INSERT INTO clips (id, job_id, start_time, end_time, score, title, hook_rationale, render_status, output_path)
+      VALUES (?, ?, ?, ?, ?, ?, ?, 'completed', ?)
     `);
 
-    for (let i = 0; i < clipCount; i++) {
-      const clipId = `${jobId}_clip_${i + 1}`;
+    for (let i = 0; i < extracted.clips.length; i++) {
+      const seg = extracted.clips[i];
       const template = candidateTemplates[i % candidateTemplates.length];
-      const startTime = Math.min(totalDuration - 15, Math.max(0, i * intervalStep));
-      const clipLength = Math.min(28, Math.max(12, Math.floor(intervalStep * 0.85)));
-      const endTime = Math.min(totalDuration, startTime + clipLength);
       const score = Math.max(78, 97 - i * 2);
 
       insertClip.run(
-        clipId,
+        seg.id,
         jobId,
-        startTime,
-        endTime,
+        seg.start_time,
+        seg.end_time,
         score,
         template.title,
-        template.rationale
+        template.rationale,
+        seg.output_path
       );
     }
 
-    // Query back formatted clips with fallback to source video stream for immediate director preview
+    // Query back formatted clips pointing directly to their real standalone HD MP4 files
     const clips = db.prepare('SELECT * FROM clips WHERE job_id = ? ORDER BY score DESC').all(jobId) as Clip[];
-    const videoStreamUrl = `/api/jobs/${jobId}/video`;
+    const videoStreamUrl = primaryVideoPath ? `/outputs/${path.basename(primaryVideoPath)}` : `/api/jobs/${jobId}/video`;
 
     const formattedClips = clips.map(c => ({
       ...c,
@@ -213,7 +207,7 @@ router.post('/jobs/youtube/import', async (req, res) => {
 
     res.status(201).json({
       success: true,
-      message: `Video loaded successfully and ${clips.length} viral clips are ready!`,
+      message: `Loaded "${jobMeta.title}" and extracted ${clips.length} real HD clips!`,
       jobId,
       status: 'completed',
       metadata: meta,

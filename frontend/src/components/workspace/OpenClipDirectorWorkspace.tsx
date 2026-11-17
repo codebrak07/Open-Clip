@@ -57,9 +57,12 @@ export const OpenClipDirectorWorkspace: React.FC<EditorialWorkspaceProps> = ({
     return `${mins}m ${secs}s`;
   };
 
+  const isStandaloneClip = Boolean(activeClip?.video_url && activeClip.video_url.includes('/outputs/'));
+
   const handleSelectClip = (clip: ClipData) => {
     previewClip(clip);
-    if (videoRef.current) {
+    const clipIsStandalone = Boolean(clip.video_url && clip.video_url.includes('/outputs/'));
+    if (videoRef.current && !clipIsStandalone) {
       videoRef.current.currentTime = clip.start_time;
       videoRef.current.play().catch(() => {});
     }
@@ -181,10 +184,10 @@ export const OpenClipDirectorWorkspace: React.FC<EditorialWorkspaceProps> = ({
                     ref={videoRef}
                     key={currentVideoSrc}
                     src={currentVideoSrc}
-                    poster="https://i.ytimg.com/vi/q6fgVVmdpgY/hqdefault.jpg"
                     style={{ width: '100%', height: '100%', objectFit: 'contain', cursor: 'pointer' }}
                     controls
                     autoPlay
+                    loop={isStandaloneClip}
                     playsInline
                     preload="auto"
                     muted={isMuted}
@@ -199,12 +202,14 @@ export const OpenClipDirectorWorkspace: React.FC<EditorialWorkspaceProps> = ({
                     }}
                     onLoadedMetadata={() => {
                       if (videoRef.current && activeClip) {
-                        videoRef.current.currentTime = activeClip.start_time;
+                        if (!isStandaloneClip) {
+                          videoRef.current.currentTime = activeClip.start_time;
+                        }
                         videoRef.current.play().catch(() => {});
                       }
                     }}
                     onTimeUpdate={() => {
-                      if (videoRef.current && activeClip) {
+                      if (videoRef.current && activeClip && !isStandaloneClip) {
                         if (videoRef.current.currentTime >= activeClip.end_time) {
                           videoRef.current.currentTime = activeClip.start_time;
                           videoRef.current.play().catch(() => {});

@@ -137,11 +137,12 @@ export const StudioHub: React.FC<StudioHubProps> = ({
         setExtractedClips(clips);
         setProgressPercent(100);
         setIngestionState('done');
-        setStatusMessage(`✓ Work is done! ${clips.length} viral clips extracted`);
+        setStatusMessage(`✓ Work is done! ${clips.length} real HD clips extracted`);
 
-        // Immediately update playback store so Director Workspace is hot and ready to play
-        const streamUrl = `${API_BASE_URL}/api/jobs/${jobId}/video`;
-        usePlaybackStore.getState().setSourceVideoUrl(streamUrl);
+        // Immediately update playback store with the real extracted HD clip stream
+        const primaryUrl = clips[0]?.video_url || importData.video_url || `/api/jobs/${jobId}/video`;
+        const fullStreamUrl = primaryUrl.startsWith('http') ? primaryUrl : `${API_BASE_URL}${primaryUrl}`;
+        usePlaybackStore.getState().setSourceVideoUrl(fullStreamUrl);
         if (clips.length > 0) {
           usePlaybackStore.getState().previewClip(clips[0]);
         }
@@ -150,53 +151,14 @@ export const StudioHub: React.FC<StudioHubProps> = ({
           onYouTubeImport(jobId, clips);
         }
       } else {
-        throw new Error('Import request returned error');
+        const errBody = await importRes.json().catch(() => ({}));
+        throw new Error(errBody.error || 'Import request returned error');
       }
     } catch (err: any) {
-      console.warn('[StudioHub Import Fallback]', err);
-      // Resilient fallback: ensure video is loaded and work is marked done with clips
-      const fallbackJobId = `job_${Date.now()}`;
-      const candidateTitles = [
-        { title: '🔥 High-Retention Viral Hook', rationale: 'Immediate curiosity spike with strong question setup and retention hold.' },
-        { title: '⚡ Key Story Climax & Twist', rationale: 'Inflection point with high emotional velocity and completion likelihood.' },
-        { title: '💡 Actionable Takeaway & Call-to-Action', rationale: 'Impactful takeaway triggering audience engagement and shares.' },
-        { title: '🎯 Deep Psychological Insight', rationale: 'Counter-intuitive truth provoking viewer discussion and comment volume.' },
-        { title: '💥 Peak Energy & Emotional Inflection', rationale: 'High speech cadence and emotional resonance driving watch time.' },
-        { title: '🤯 Mindblowing Fact & Proof', rationale: 'Unexpected data point keeping viewers through the middle retention dip.' },
-        { title: '🌪️ The Conflict & Dramatic Struggle', rationale: 'Dramatic struggle creating strong narrative investment and empathy.' },
-        { title: '🚀 The Breakthrough Revelation', rationale: 'Sudden breakthrough moment providing high payoff for the viewer.' },
-        { title: '💎 Golden Nugget Summary', rationale: 'Bite-sized takeaway optimized for Instagram Saves and TikTok Favorites.' },
-        { title: '📣 Final Warning & Challenge', rationale: 'Direct-to-camera audience challenge driving rewatch loop frequency.' },
-      ];
-
-      const fallbackClips: ClipData[] = Array.from({ length: targetClipCount }, (_, i) => {
-        const start = i * 22;
-        const template = candidateTitles[i % candidateTitles.length];
-        return {
-          id: `${fallbackJobId}_clip_${i + 1}`,
-          start_time: start,
-          end_time: start + 18,
-          score: Math.max(78, 97 - i * 2),
-          title: template.title,
-          hook_rationale: template.rationale,
-        };
-      });
-
-      setCreatedJobId(fallbackJobId);
-      setExtractedClips(fallbackClips);
-      setProgressPercent(100);
-      setIngestionState('done');
-      setStatusMessage(`✓ Work is done! ${fallbackClips.length} viral clips extracted`);
-
-      const fallbackStream = `${API_BASE_URL}/api/jobs/${fallbackJobId}/video`;
-      usePlaybackStore.getState().setSourceVideoUrl(fallbackStream);
-      if (fallbackClips.length > 0) {
-        usePlaybackStore.getState().previewClip(fallbackClips[0]);
-      }
-
-      if (onYouTubeImport) {
-        onYouTubeImport(fallbackJobId, fallbackClips);
-      }
+      console.error('[StudioHub Import Error]', err);
+      setIngestionState('error');
+      setProgressPercent(0);
+      setStatusMessage(`✕ Import failed: ${err?.message || 'Unable to extract video stream'}`);
     }
   };
 
@@ -494,10 +456,12 @@ export const StudioHub: React.FC<StudioHubProps> = ({
                     }}
                   >
                     {ingestionState === 'done'
-                      ? '3 Viral Clips Ready'
+                      ? `${extractedClips.length} Real HD Clips Ready`
+                      : ingestionState === 'error'
+                      ? 'Extraction Error'
                       : ingestionState === 'loaded'
                       ? 'Stream Synchronized'
-                      : 'Processing Pipeline'}
+                      : `Extracting ${targetClipCount} HD Clips in Parallel...`}
                   </span>
                 </div>
 

@@ -74,16 +74,15 @@ def doctor():
 def inspect(source: str):
     """Inspects a video file or YouTube URL for duration, resolution, and streams."""
     if URLValidator.is_valid_youtube_url(source):
-        console.print(f"[bold cyan]Probing remote video:[/] {source}")
         meta = YtDlpClient.inspect_metadata(source)
-        console.print_json(data=meta)
+        print(json.dumps(meta))
     else:
         path = Path(source)
         if not path.exists():
             console.print(f"[bold red]File not found:[/] {source}")
             raise typer.Exit(1)
         meta = FFmpegRunner.probe(str(path))
-        console.print_json(data=meta.model_dump())
+        print(json.dumps(meta.model_dump()))
 
 @app.command()
 def download(url: str, job_id: str = "cli_job"):
@@ -91,6 +90,12 @@ def download(url: str, job_id: str = "cli_job"):
     console.print(f"[bold green]Starting download for:[/] {url}")
     out = YtDlpClient.download_video(url, job_id)
     console.print(f"[bold green]Download completed:[/] {out}")
+
+@app.command(name="extract-clips")
+def extract_clips(url: str, job_id: str = "cli_job", clip_count: int = 5):
+    """Extracts multiple real HD MP4 clips in parallel directly from a YouTube URL."""
+    result = YtDlpClient.extract_clips_parallel(url, job_id=job_id, clip_count=clip_count)
+    print(json.dumps(result))
 
 @app.command()
 def transcribe(source: str):
