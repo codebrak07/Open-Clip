@@ -173,6 +173,19 @@ export function App() {
           onUploadClick={triggerFilePicker}
           isUploading={isUploading}
           onNavigateToFootball={() => setActiveView('football-studio')}
+          onOpenDirectorWorkspace={(jobId) => {
+            if (jobId) setActiveJobId(jobId);
+            setActiveView('workspace');
+          }}
+          onYouTubeImport={(jobId, importedClips) => {
+            if (jobId) setActiveJobId(jobId);
+            if (importedClips && importedClips.length > 0) {
+              setClips(importedClips);
+              if (!activeClip) {
+                previewClip(importedClips[0]);
+              }
+            }
+          }}
         />
       )}
 
