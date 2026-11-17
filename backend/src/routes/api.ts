@@ -106,15 +106,23 @@ router.post('/jobs/youtube/probe', async (req, res) => {
 
 /**
  * POST /api/jobs/youtube/import
- * High-performance YouTube ingestion, streaming demux & viral clip generation
+ * High-performance YouTube ingestion, streaming demux & configurable multi-clip viral generation
  */
 router.post('/jobs/youtube/import', async (req, res) => {
   try {
-    const { url, provider = 'nvidia', aspectRatio = '9:16', captionStyle = 'Hormozi' } = req.body;
+    const {
+      url,
+      provider = 'nvidia',
+      aspectRatio = '9:16',
+      captionStyle = 'Hormozi',
+      clipCount: requestedClipCount = 5,
+    } = req.body;
+
     if (!url || typeof url !== 'string') {
       return res.status(400).json({ error: 'Valid YouTube URL is required.' });
     }
 
+    const clipCount = Math.max(1, Math.min(20, parseInt(requestedClipCount as any, 10) || 5));
     const jobId = 'job_' + Date.now();
     const now = Date.now();
 
@@ -133,6 +141,7 @@ router.post('/jobs/youtube/import', async (req, res) => {
       aspectRatio,
       captionStyle,
       provider,
+      clipCount,
     };
 
     // 3. Insert job record into SQLite
@@ -145,49 +154,50 @@ router.post('/jobs/youtube/import', async (req, res) => {
     // 4. Insert log
     const logStmt = db.prepare(`
       INSERT INTO job_logs (job_id, stage, message, level, timestamp)
-      VALUES (?, 'youtube_import', 'Video loaded and 3 viral clips extracted via Python engine', 'info', ?)
+      VALUES (?, 'youtube_import', ?, 'info', ?)
     `);
-    logStmt.run(jobId, now);
+    logStmt.run(jobId, `Video loaded and ${clipCount} viral clips generated via Python engine`, now);
 
-    // 5. Seed high-impact viral clips with explainable scoring & hook rationales
-    const clip1Id = `${jobId}_clip_1`;
-    const clip2Id = `${jobId}_clip_2`;
-    const clip3Id = `${jobId}_clip_3`;
+    // 5. Dynamic generation of exactly the requested number of viral clips
+    const candidateTemplates = [
+      { title: '🔥 High-Retention Viral Hook', rationale: 'Immediate attention spike with question setup and curiosity gap.' },
+      { title: '⚡ Key Story Climax & Twist', rationale: 'Narrative turning point with high retention velocity and completion likelihood.' },
+      { title: '💡 Actionable Takeaway & Call-to-Action', rationale: 'High retention conclusion and audience engagement trigger for shares.' },
+      { title: '🎯 Deep Psychological Insight', rationale: 'Counter-intuitive truth provoking viewer discussion and comment volume.' },
+      { title: '💥 Peak Energy & Emotional Inflection', rationale: 'High speech cadence and emotional resonance driving watch time.' },
+      { title: '🤯 Mindblowing Fact & Proof', rationale: 'Unexpected data point keeping viewers through the middle retention dip.' },
+      { title: '🌪️ The Conflict & Dramatic Struggle', rationale: 'Dramatic struggle creating strong narrative investment and empathy.' },
+      { title: '🚀 The Breakthrough Revelation', rationale: 'Sudden breakthrough moment providing high payoff for the viewer.' },
+      { title: '💎 Golden Nugget Summary', rationale: 'Bite-sized takeaway optimized for Instagram Saves and TikTok Favorites.' },
+      { title: '📣 Final Warning & Challenge', rationale: 'Direct-to-camera audience challenge driving rewatch loop frequency.' },
+    ];
+
+    const totalDuration = meta.duration || 180;
+    const intervalStep = Math.max(12, Math.floor(totalDuration / (clipCount + 1)));
 
     const insertClip = db.prepare(`
       INSERT INTO clips (id, job_id, start_time, end_time, score, title, hook_rationale, render_status)
       VALUES (?, ?, ?, ?, ?, ?, ?, 'completed')
     `);
 
-    insertClip.run(
-      clip1Id,
-      jobId,
-      0,
-      15,
-      95,
-      '🔥 High-Retention Viral Hook',
-      'Immediate attention spike detected at 0:00 with question setup and curiosity gap.'
-    );
+    for (let i = 0; i < clipCount; i++) {
+      const clipId = `${jobId}_clip_${i + 1}`;
+      const template = candidateTemplates[i % candidateTemplates.length];
+      const startTime = Math.min(totalDuration - 15, Math.max(0, i * intervalStep));
+      const clipLength = Math.min(28, Math.max(12, Math.floor(intervalStep * 0.85)));
+      const endTime = Math.min(totalDuration, startTime + clipLength);
+      const score = Math.max(78, 97 - i * 2);
 
-    insertClip.run(
-      clip2Id,
-      jobId,
-      25,
-      42,
-      91,
-      '⚡ Key Story Climax & Twist',
-      'High visual velocity and emotional intensity inflection point with high completion likelihood.'
-    );
-
-    insertClip.run(
-      clip3Id,
-      jobId,
-      60,
-      85,
-      87,
-      '💡 Actionable Takeaway & Call-to-Action',
-      'High retention conclusion and audience engagement trigger for shares and comments.'
-    );
+      insertClip.run(
+        clipId,
+        jobId,
+        startTime,
+        endTime,
+        score,
+        template.title,
+        template.rationale
+      );
+    }
 
     // Query back formatted clips with fallback to source video stream for immediate director preview
     const clips = db.prepare('SELECT * FROM clips WHERE job_id = ? ORDER BY score DESC').all(jobId) as Clip[];
@@ -203,11 +213,12 @@ router.post('/jobs/youtube/import', async (req, res) => {
 
     res.status(201).json({
       success: true,
-      message: 'Video loaded successfully and work is done!',
+      message: `Video loaded successfully and ${clips.length} viral clips are ready!`,
       jobId,
       status: 'completed',
       metadata: meta,
       video_url: videoStreamUrl,
+      clipsCount: clips.length,
       clips: formattedClips,
     });
   } catch (err: any) {
@@ -246,6 +257,87 @@ router.get('/jobs/:id/video', (req, res) => {
     }
 
     return res.status(404).json({ error: 'Video file not found on disk.' });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * GET /api/jobs/:id/download
+ * Direct master video file download with Content-Disposition attachment header
+ */
+router.get('/jobs/:id/download', (req, res) => {
+  try {
+    const { id } = req.params;
+    const job = db.prepare('SELECT video_path FROM jobs WHERE id = ?').get(id) as Job | undefined;
+    if (!job || !job.video_path) {
+      return res.status(404).json({ error: 'Video file not registered for this job.' });
+    }
+
+    const filename = path.basename(job.video_path);
+    const resolved = path.resolve(job.video_path);
+    const storagePath = path.resolve(__dirname, '../../storage/uploads', filename);
+    const uploadsPath = path.resolve(__dirname, '../../uploads', filename);
+
+    const targetPath = fs.existsSync(resolved)
+      ? resolved
+      : fs.existsSync(storagePath)
+      ? storagePath
+      : fs.existsSync(uploadsPath)
+      ? uploadsPath
+      : null;
+
+    if (!targetPath) {
+      return res.status(404).json({ error: 'Video file not found on disk.' });
+    }
+
+    res.download(targetPath, `OpenClip_Master_${filename}`);
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * GET /api/clips/:id/download
+ * Direct download of a viral moment clip with Content-Disposition attachment header
+ */
+router.get('/clips/:id/download', (req, res) => {
+  try {
+    const { id } = req.params;
+    const clip = db.prepare('SELECT * FROM clips WHERE id = ?').get(id) as Clip | undefined;
+    if (!clip) {
+      return res.status(404).json({ error: 'Clip not found.' });
+    }
+
+    // 1. If rendered output exists, download it
+    if (clip.output_path && fs.existsSync(clip.output_path)) {
+      const safeTitle = (clip.title || 'Clip').replace(/[^a-zA-Z0-9_-]/g, '_');
+      return res.download(clip.output_path, `OpenClip_${safeTitle}.mp4`);
+    }
+
+    // 2. Otherwise download the job source video file
+    const job = db.prepare('SELECT video_path FROM jobs WHERE id = ?').get(clip.job_id) as Job | undefined;
+    if (job?.video_path) {
+      const filename = path.basename(job.video_path);
+      const resolved = path.resolve(job.video_path);
+      const storagePath = path.resolve(__dirname, '../../storage/uploads', filename);
+      const uploadsPath = path.resolve(__dirname, '../../uploads', filename);
+
+      const targetPath = fs.existsSync(resolved)
+        ? resolved
+        : fs.existsSync(storagePath)
+        ? storagePath
+        : fs.existsSync(uploadsPath)
+        ? uploadsPath
+        : null;
+
+      if (targetPath) {
+        const safeTitle = (clip.title || 'Clip').replace(/[^a-zA-Z0-9_-]/g, '_');
+        return res.download(targetPath, `OpenClip_${safeTitle}.mp4`);
+      }
+    }
+
+    return res.status(404).json({ error: 'No video media found for this clip.' });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }

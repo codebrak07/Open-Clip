@@ -17,7 +17,7 @@ export const OpenClipDirectorWorkspace: React.FC<EditorialWorkspaceProps> = ({
   onGenerateMaster,
 }) => {
 
-  const { sourceVideoUrl, activeClip, previewClip, aspectRatio, setAspectRatio } = usePlaybackStore();
+  const { sourceVideoUrl, activeClip, previewClip, aspectRatio, setAspectRatio, isMuted, toggleMute } = usePlaybackStore();
   const videoRef = React.useRef<HTMLVideoElement | null>(null);
   const [hoveredClipId, setHoveredClipId] = useState<string | null>(null);
   const [isDownloadModalOpen, setIsDownloadModalOpen] = useState(false);
@@ -176,29 +176,73 @@ export const OpenClipDirectorWorkspace: React.FC<EditorialWorkspaceProps> = ({
               }}
             >
               {currentVideoSrc ? (
-                <video
-                  ref={videoRef}
-                  key={currentVideoSrc}
-                  src={currentVideoSrc}
-                  style={{ width: '100%', height: '100%', objectFit: 'contain' }}
-                  controls
-                  autoPlay
-                  playsInline
-                  onLoadedMetadata={() => {
-                    if (videoRef.current && activeClip) {
-                      videoRef.current.currentTime = activeClip.start_time;
-                      videoRef.current.play().catch(() => {});
-                    }
-                  }}
-                  onTimeUpdate={() => {
-                    if (videoRef.current && activeClip) {
-                      if (videoRef.current.currentTime >= activeClip.end_time) {
+                <div style={{ position: 'relative', width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                  <video
+                    ref={videoRef}
+                    key={currentVideoSrc}
+                    src={currentVideoSrc}
+                    poster="https://i.ytimg.com/vi/q6fgVVmdpgY/hqdefault.jpg"
+                    style={{ width: '100%', height: '100%', objectFit: 'contain', cursor: 'pointer' }}
+                    controls
+                    autoPlay
+                    playsInline
+                    preload="auto"
+                    muted={isMuted}
+                    onClick={() => {
+                      if (videoRef.current) {
+                        if (videoRef.current.paused) {
+                          videoRef.current.play().catch(() => {});
+                        } else {
+                          videoRef.current.pause();
+                        }
+                      }
+                    }}
+                    onLoadedMetadata={() => {
+                      if (videoRef.current && activeClip) {
                         videoRef.current.currentTime = activeClip.start_time;
                         videoRef.current.play().catch(() => {});
                       }
-                    }
-                  }}
-                />
+                    }}
+                    onTimeUpdate={() => {
+                      if (videoRef.current && activeClip) {
+                        if (videoRef.current.currentTime >= activeClip.end_time) {
+                          videoRef.current.currentTime = activeClip.start_time;
+                          videoRef.current.play().catch(() => {});
+                        }
+                      }
+                    }}
+                  />
+                  {isMuted && (
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        toggleMute();
+                        if (videoRef.current) {
+                          videoRef.current.muted = false;
+                          videoRef.current.play().catch(() => {});
+                        }
+                      }}
+                      style={{
+                        position: 'absolute',
+                        top: '12px',
+                        right: '12px',
+                        backgroundColor: 'rgba(0, 0, 0, 0.75)',
+                        color: '#FFF',
+                        border: '1px solid rgba(255, 255, 255, 0.2)',
+                        borderRadius: '20px',
+                        padding: '4px 10px',
+                        fontSize: '11px',
+                        fontFamily: "'Inter', sans-serif",
+                        fontWeight: 600,
+                        cursor: 'pointer',
+                        backdropFilter: 'blur(4px)',
+                        zIndex: 10,
+                      }}
+                    >
+                      🔇 Click to Unmute
+                    </button>
+                  )}
+                </div>
               ) : clips.length > 0 ? (
                 <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', color: '#888', gap: '12px', padding: '40px' }}>
                   <span style={{ fontSize: '32px' }}>⚡</span>
@@ -221,7 +265,7 @@ export const OpenClipDirectorWorkspace: React.FC<EditorialWorkspaceProps> = ({
             </div>
 
             {/* Candidate Cards Grid with Micro-Animation Hover Effects */}
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '16px' }}>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(260px, 1fr))', gap: '16px' }}>
               {clips.length > 0 ? (
                 clips.map((clip) => {
                   const isSelected = activeClip?.id === clip.id;
@@ -473,9 +517,16 @@ export const OpenClipDirectorWorkspace: React.FC<EditorialWorkspaceProps> = ({
                 <span>🎬</span> RENDER FINAL MASTER VIDEO
               </button>
 
-              {activeClip?.video_url && (
+              {clips.length > 0 && (
                 <button
-                  onClick={() => setIsDownloadModalOpen(true)}
+                  onClick={() => {
+                    const clipId = activeClip?.id || clips[0]?.id;
+                    if (clipId) {
+                      window.location.href = `${API_BASE_URL}/api/clips/${clipId}/download`;
+                    } else if (inferredJobId) {
+                      window.location.href = `${API_BASE_URL}/api/jobs/${inferredJobId}/download`;
+                    }
+                  }}
                   style={{
                     backgroundColor: '#121212',
                     color: '#FFF',
@@ -487,9 +538,13 @@ export const OpenClipDirectorWorkspace: React.FC<EditorialWorkspaceProps> = ({
                     textAlign: 'center',
                     border: 'none',
                     cursor: 'pointer',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    gap: '6px',
                   }}
                 >
-                  ⬇️ Download Master Video ({selectedFormat})
+                  <span>⬇️</span> Download Current Clip ({selectedFormat})
                 </button>
               )}
             </div>
@@ -551,24 +606,20 @@ export const OpenClipDirectorWorkspace: React.FC<EditorialWorkspaceProps> = ({
                 No, Cancel
               </button>
               <button
-                onClick={async () => {
+                onClick={() => {
                   setIsDownloadModalOpen(false);
-                  if (activeClip?.video_url) {
-                    const fullVideoUrl = activeClip.video_url.startsWith('http')
-                      ? activeClip.video_url
-                      : `${API_BASE_URL}${activeClip.video_url}`;
-
-                    const res = await fetch(fullVideoUrl);
-                    const blob = await res.blob();
-                    const blobUrl = URL.createObjectURL(blob);
-
+                  const clipId = activeClip?.id || clips[0]?.id;
+                  if (clipId) {
+                    window.location.href = `${API_BASE_URL}/api/clips/${clipId}/download`;
+                  } else if (inferredJobId) {
+                    window.location.href = `${API_BASE_URL}/api/jobs/${inferredJobId}/download`;
+                  } else if (currentVideoSrc) {
                     const downloadAnchor = document.createElement('a');
-                    downloadAnchor.href = blobUrl;
-                    downloadAnchor.download = `OpenClip_Master_${activeClip.id}.mp4`;
+                    downloadAnchor.href = currentVideoSrc;
+                    downloadAnchor.download = `OpenClip_${activeClip?.title || 'Master'}.mp4`;
                     document.body.appendChild(downloadAnchor);
                     downloadAnchor.click();
                     document.body.removeChild(downloadAnchor);
-                    URL.revokeObjectURL(blobUrl);
                   }
                 }}
                 style={{

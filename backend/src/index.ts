@@ -1,6 +1,7 @@
 import express from 'express';
 import cors from 'cors';
-import { PORT, OUTPUTS_DIR } from './config';
+import path from 'path';
+import { PORT, OUTPUTS_DIR, UPLOADS_DIR } from './config';
 import apiRouter from './routes/api';
 import v1Router from './routes/v1';
 import { QueueManager } from './services/QueueManager';
