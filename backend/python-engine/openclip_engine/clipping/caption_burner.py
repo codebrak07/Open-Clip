@@ -514,6 +514,8 @@ def build_reframe_and_caption_clip(
     raw_all_cues: Optional[List[Dict[str, Any]]] = None,
     clip_start: float = 0.0,
     clip_end: Optional[float] = None,
+    hook_sentence: Optional[str] = None,
+    title: Optional[str] = None,
 ) -> Path:
     """
     Produces a crisp 1080p reframed MP4 in the chosen aspect ratio with animated burnt-in captions.
@@ -534,6 +536,8 @@ def build_reframe_and_caption_clip(
             clip_end=eff_end if raw_all_cues is not None else _probe_duration(raw_clip_path, ffmpeg_bin),
             aspect_ratio=aspect_ratio,
             ffmpeg_bin=ffmpeg_bin,
+            title=title,
+            hook_sentence=hook_sentence,
         )
 
     target_w, target_h = ASPECT_DIMS.get(aspect_ratio, (1080, 1920))

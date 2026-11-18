@@ -1,0 +1,15 @@
+[
+  {
+    "video": "example_video.mp4",
+    "gold_start": 12.0,
+    "words_json": "path/to/words.json",
+    "top_5_candidates": [
+      {
+        "start": 12.0,
+        "end": 32.0,
+        "score": 8.5,
+        "first_sentence": "Replace with your processed video's top 5 candidates"
+      }
+    ]
+  }
+]

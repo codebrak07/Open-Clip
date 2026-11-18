@@ -679,6 +679,348 @@ def _verify_e_sfx(src_mp4: Path, tmp_dir: Path) -> Tuple[bool, str]:
     )
 
 
+def _verify_g_framing(tmp_dir: Path) -> Tuple[bool, str]:
+    """
+    G. Framing: 1920x1080 synthetic source with two bright rectangles at 15% and 85% of width
+    and empty middle, injected via --subjects-json. Verifies:
+      - Both rects fully inside window with >= 4% horizontal margin
+      - Gap ratio within 5% of source's
+      - Unchanged width/height ratio (no stretch)
+      - Reference-matched framing (--framing-ref) meets <=5% center error & <=15% size error
+    """
+    W_src, H_src = 1920, 1080
+    img = Image.new("RGB", (W_src, H_src), (36, 40, 48))
+    draw = ImageDraw.Draw(img)
+    # Left bright orange-red rect centered at 15% (x=10%..20%, y=28%..72%)
+    lx0, ly0, lx1, ly1 = int(0.10 * W_src), int(0.28 * H_src), int(0.20 * W_src), int(0.72 * H_src)
+    # Right bright cyan rect centered at 85% (x=80%..90%, y=28%..72%)
+    rx0, ry0, rx1, ry1 = int(0.80 * W_src), int(0.28 * H_src), int(0.90 * W_src), int(0.72 * H_src)
+    draw.rectangle((lx0, ly0, lx1, ly1), fill=(250, 70, 40))
+    draw.rectangle((rx0, ry0, rx1, ry1), fill=(40, 225, 250))
+
+    src_png = tmp_dir / "two_shot_src.png"
+    src_mp4 = tmp_dir / "two_shot_src.mp4"
+    img.save(src_png)
+    subprocess.run(
+        [
+            "ffmpeg", "-y", "-v", "error",
+            "-loop", "1", "-framerate", "30", "-t", "2.0", "-i", str(src_png),
+            "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo:d=2.0",
+            "-c:v", "libx264", "-preset", "fast", "-crf", "18", "-pix_fmt", "yuv420p",
+            "-c:a", "aac", "-shortest", str(src_mp4),
+        ],
+        check=True,
+    )
+
+    subj_json = tmp_dir / "subjects.json"
+    subj_boxes = [
+        {"x": 0.10, "y": 0.28, "w": 0.10, "h": 0.44, "kind": "person"},
+        {"x": 0.80, "y": 0.28, "w": 0.10, "h": 0.44, "kind": "person"},
+    ]
+    subj_json.write_text(json.dumps(subj_boxes), encoding="utf-8")
+
+    # 1) Auto two-shot framing
+    out_auto = OUT_DIR / "verify_g_two_shot.mp4"
+    lay_auto = replace(
+        DEFAULT_LAYOUT,
+        framing_mode="auto",
+        subjects_json_path=str(subj_json),
+        title_enabled=False,
+        captions_enabled=False,
+        grade_enabled=False,
+    )
+    _, meta_auto = render_polished_clip(
+        src_mp4, [], out_auto,
+        layout=lay_auto,
+        sfx_config=replace(DEFAULT_SFX_CONFIG, mode="off"),
+        use_llm=False,
+        detect_scenes=False,
+        write_framing_debug=True,
+        return_meta=True,
+    )
+
+    frame = _extract_frame(out_auto, 0.5)
+    win = frame[340:1690, :, :]
+    r_c = win[:, :, 0].astype(np.int32)
+    g_c = win[:, :, 1].astype(np.int32)
+    b_c = win[:, :, 2].astype(np.int32)
+
+    left_mask = (r_c > 190) & (b_c < 90) & (g_c < 130)
+    right_mask = (b_c > 190) & (g_c > 170) & (r_c < 100)
+    lys, lxs = np.where(left_mask)
+    rys, rxs = np.where(right_mask)
+    if lys.size < 1000 or rys.size < 1000:
+        return False, f"Rects missing in output (L={lys.size}, R={rys.size})"
+
+    ol_x0, ol_x1 = int(lxs.min()), int(lxs.max())
+    ol_y0, ol_y1 = int(lys.min()), int(lys.max())
+    or_x0, or_x1 = int(rxs.min()), int(rxs.max())
+    or_y0, or_y1 = int(rys.min()), int(rys.max())
+
+    left_margin_pct = ol_x0 / 1080.0 * 100.0
+    right_margin_pct = (1079 - or_x1) / 1080.0 * 100.0
+    src_gap_ratio = (rx0 - lx1) / float(rx1 - lx0)
+    out_gap_ratio = (or_x0 - ol_x1) / float(max(1, or_x1 - ol_x0))
+    gap_err_pct = abs(out_gap_ratio - src_gap_ratio) / max(1e-6, src_gap_ratio) * 100.0
+
+    src_ar = (lx1 - lx0) / float(ly1 - ly0)
+    out_ar_l = (ol_x1 - ol_x0) / float(max(1, ol_y1 - ol_y0))
+    out_ar_r = (or_x1 - or_x0) / float(max(1, or_y1 - or_y0))
+    ar_err_pct = max(abs(out_ar_l - src_ar), abs(out_ar_r - src_ar)) / src_ar * 100.0
+
+    # 2) Reference-matched framing (--framing-ref)
+    ref_img_p = tmp_dir / "framing_ref.png"
+    Image.new("RGB", (1080, 1350), (30, 30, 35)).save(ref_img_p)
+    ref_boxes = [
+        {"x": 0.083, "y": 0.37, "w": 0.104, "h": 0.205},
+        {"x": 0.813, "y": 0.37, "w": 0.104, "h": 0.205},
+    ]
+    out_ref = tmp_dir / "verify_g_ref.mp4"
+    lay_ref = replace(lay_auto, framing_mode="ref", framing_ref_path=str(ref_img_p))
+    _, meta_ref = render_polished_clip(
+        src_mp4, [], out_ref,
+        layout=lay_ref,
+        sfx_config=replace(DEFAULT_SFX_CONFIG, mode="off"),
+        use_llm=False,
+        detect_scenes=False,
+        ref_boxes_override=ref_boxes,
+        return_meta=True,
+    )
+    ref_shot = (meta_ref.get("framing_report") or {}).get("shots", [{}])[0]
+    resids = ref_shot.get("residuals") or {}
+    ref_ok = (
+        ref_shot.get("mode") == "ref_matched"
+        and resids.get("accepted") is True
+        and float(resids.get("mean_center_err_pct", 99.0)) <= 5.0
+        and float(resids.get("mean_size_err_pct", 99.0)) <= 15.0
+    )
+
+    ok = (
+        left_margin_pct >= 4.0
+        and right_margin_pct >= 4.0
+        and gap_err_pct <= 5.0
+        and ar_err_pct <= 2.5
+        and ref_ok
+        and Path(meta_auto["framing_report_json"]).exists()
+    )
+    return ok, (
+        f"auto_mode={meta_auto['framing_report']['shots'][0]['mode']}, margins=({left_margin_pct:.1f}%,{right_margin_pct:.1f}%)>=4%, "
+        f"gap_ratio={out_gap_ratio:.3f} vs {src_gap_ratio:.3f} (err={gap_err_pct:.2f}%<=5%), ar_err={ar_err_pct:.2f}%, "
+        f"ref_residuals={resids}"
+    )
+
+
+def _verify_h_hook(tmp_dir: Path) -> Tuple[bool, str]:
+    """
+    H. Hook unit tests: refine_start (strips 'so um welcome back guys'), sentence-boundary snapping,
+    sponsor rejection, position-bias shuffle, JSON schema validation, rules-only fallback when all LLMs fail,
+    and tools/eval_hooks.py run.
+    """
+    from openclip_engine.scoring.hook_selector import (
+        build_utterances,
+        generate_candidates,
+        judge_candidates_llm,
+        refine_start,
+        select_hook_clips,
+        shuffle_for_provider,
+        validate_judge_item,
+    )
+
+    errs: List[str] = []
+
+    # Build synthetic multi-segment transcript with:
+    # 0-7s: filler preamble + greeting
+    # 7-25s: strong hook + payoff
+    # 26-44s: sponsor ad read
+    def _mk_words(text: str, t0: float, step: float = 0.30) -> List[Dict[str, Any]]:
+        out = []
+        t = t0
+        for tok in text.split():
+            out.append({"word": tok, "start": round(t, 3), "end": round(t + step * 0.85, 3)})
+            t += step
+        return out
+
+    words: List[Dict[str, Any]] = []
+    words += _mk_words("So um welcome back guys to another episode today.", 0.0, 0.35)
+    words += _mk_words("Why does nobody talk about this $250,000 trap that almost destroyed everything?", 3.8, 0.32)
+    words += _mk_words("Wait until you see what actually happens when the timer hits zero.", 8.5, 0.32)
+    words += _mk_words("Everyone thought he would lose immediately without a single chance to survive.", 13.0, 0.32)
+    words += _mk_words("Then he pulled off the most insane comeback in history!", 17.5, 0.32)
+    words += _mk_words("This video is sponsored by Acme VPN use code SAVE50 link in the description.", 23.0, 0.35)
+    words += _mk_words("Dont forget to subscribe to the channel and hit that bell thanks for watching.", 28.5, 0.35)
+
+    utts = build_utterances(words)
+    cands = generate_candidates(utts, min_dur=12.0, max_dur=30.0)
+    if not cands:
+        return False, "No candidates generated"
+
+    # 1. Sentence-boundary snapping
+    utt_starts = {round(u.start, 3) for u in utts}
+    if any(round(c.start, 3) not in utt_starts for c in cands):
+        errs.append("candidate did not snap to sentence start")
+
+    # 2. refine_start strips preamble "So um welcome back guys..." -> starts on "Why does nobody..." with 0.15s pre-roll
+    c0 = cands[0]
+    ref_st, ref_en, hook_sent = refine_start(c0, utts, min_dur=10.0)
+    if hook_sent.lower().startswith(("so ", "um ", "welcome ")):
+        errs.append(f"refine_start kept leading filler: {hook_sent!r}")
+    if abs(ref_st - (3.8 - 0.15)) > 0.35:
+        errs.append(f"refine_start expected ~3.65s, got {ref_st:.2f}s ({hook_sent!r})")
+
+    # 3. Position-bias shuffle differs across providers and is deterministic
+    s_groq_1 = [c.id for c in shuffle_for_provider(cands[:8], "groq", seed=42)]
+    s_groq_2 = [c.id for c in shuffle_for_provider(cands[:8], "groq", seed=42)]
+    s_gem = [c.id for c in shuffle_for_provider(cands[:8], "gemini", seed=42)]
+    if s_groq_1 != s_groq_2 or (len(cands) >= 3 and s_groq_1 == s_gem):
+        errs.append("provider shuffle not deterministic or identical across providers")
+
+    # 4. Strict JSON schema validation
+    vids = {c.id for c in cands[:4]}
+    good = validate_judge_item(
+        {"id": cands[0].id, "hook_3s": 8.5, "standalone": 8.0, "payoff": 7.5, "intensity": 8.0, "hook_start_t": 3.8, "reason": "Strong stakes"},
+        vids,
+    )
+    bad_range = validate_judge_item(
+        {"id": cands[0].id, "hook_3s": 14.0, "standalone": 8.0, "payoff": 7.5, "intensity": 8.0, "hook_start_t": 3.8, "reason": "Bad"},
+        vids,
+    )
+    bad_id = validate_judge_item(
+        {"id": "nonexistent", "hook_3s": 8.0, "standalone": 8.0, "payoff": 7.5, "intensity": 8.0, "hook_start_t": 3.8, "reason": "Bad"},
+        vids,
+    )
+    if good is None or bad_range is not None or bad_id is not None:
+        errs.append("JSON schema validation failed")
+
+    # 5. Rules-only fallback when every LLM provider fails + sponsor rejection + report output
+    def _failing_llm(provider: str, prompt: str, sys_p: str, temp: float) -> Any:
+        raise RuntimeError(f"{provider} offline")
+
+    rep_dir = tmp_dir / "hook_rep"
+    selected, hmeta = select_hook_clips(
+        words, clip_count=1, min_dur=12.0, max_dur=25.0,
+        report_dir=rep_dir, video_label="synthetic_hook_test",
+        use_llm=True, llm_caller=_failing_llm, providers=["groq", "gemini"],
+    )
+    if not selected:
+        errs.append("rules-only fallback returned no clips")
+    else:
+        win = selected[0]
+        if "sponsored" in win.hook_sentence.lower() or "subscribe" in win.hook_sentence.lower():
+            errs.append(f"sponsor selected as winner: {win.hook_sentence}")
+        if "trap" not in win.hook_sentence.lower() and "nobody" not in win.hook_sentence.lower():
+            errs.append(f"wrong hook winner: {win.hook_sentence!r}")
+    if not (rep_dir / "analysis_report.json").exists() or not (rep_dir / "hook_debug.md").exists():
+        errs.append("analysis_report.json or hook_debug.md missing")
+
+    # 6. Run tools/eval_hooks.py
+    ev_res = subprocess.run(
+        [sys.executable, str(REPO_ROOT / "tools" / "eval_hooks.py")],
+        capture_output=True, text=True, timeout=20,
+    )
+    if ev_res.returncode != 0:
+        errs.append(f"eval_hooks.py failed: {ev_res.stderr[-120:]}")
+
+    winner_preview = selected[0].hook_sentence[:40] if selected else None
+    return len(errs) == 0, (
+        f"refined_start={ref_st:.2f}s hook={hook_sent[:48]!r}, shuffle_ok={s_groq_1 != s_gem}, "
+        f"fallback_winner={winner_preview!r}, eval_hooks_rc={ev_res.returncode}, errs={errs}"
+    )
+
+
+def _verify_i_glow_shadow_title() -> Tuple[bool, str]:
+    """
+    I. M6c 3-ring glow test (4-14>=24, 14-28>=10, 28-44>=4 on gray128/bright235/dark30),
+    shadow 3-10px below-right >=25% luma drop on gray128, highlight_unit='word',
+    and M6d title completeness (no dangling ending, <=8 words).
+    """
+    from openclip_engine.clipping.title_renderer import is_title_complete, resolve_title_and_keyword
+
+    errs: List[str] = []
+    st_on = KARAOKE_POP
+    st_ng = replace(st_on, glow_enabled=False)
+    st_ns = replace(st_on, shadow_enabled=False)
+    st_ns_ng = replace(st_on, glow_enabled=False, shadow_enabled=False)
+
+    min_r1 = min_r2 = min_r3 = min_sh_g = min_sh_ng = 999.0
+    for color, word in [("yellow", "Every"), ("cyan", "game"), ("red", "has"), ("green", "your")]:
+        ev = RenderEvent(0, word, [word], None, color, 0.0, 1.0, False)
+        s_on = render_event_sprite(ev, 1080, 386, 0, st_on)
+        s_ng = render_event_sprite(ev, 1080, 386, 0, st_ng)
+        s_ns = render_event_sprite(ev, 1080, 386, 0, st_ns)
+        s_ns_ng = render_event_sprite(ev, 1080, 386, 0, st_ns_ng)
+
+        is_g = s_ns_ng[:, :, 3] > 120
+        gu = is_g.astype(np.uint8) * 255
+        d4, d14, d28, d44 = [_separable_max_filter_2d(gu, k) > 0 for k in (9, 29, 57, 89)]
+        r1, r2, r3 = d14 & ~d4, d28 & ~d14, d44 & ~d28
+
+        def comp(spr: np.ndarray, bg: int) -> np.ndarray:
+            a = spr[:, :, 3:4].astype(np.float32) / 255.0
+            return spr[:, :, :3].astype(np.float32) * a + float(bg) * (1.0 - a)
+
+        for bg in (128, 235, 30):
+            min_r1 = min(min_r1, float(np.abs(comp(s_on, bg)[r1] - comp(s_ng, bg)[r1]).mean()))
+            min_r2 = min(min_r2, float(np.abs(comp(s_on, bg)[r2] - comp(s_ng, bg)[r2]).mean()))
+            min_r3 = min(min_r3, float(np.abs(comp(s_on, bg)[r3] - comp(s_ng, bg)[r3]).mean()))
+
+        H, W = gu.shape
+        sh_b = np.zeros((H, W), bool)
+        for dy in range(3, 11):
+            for dx in range(3, 11):
+                sh_b[dy:, dx:] |= is_g[: H - dy, : W - dx]
+        sh_b &= ~is_g
+
+        c1, c0 = comp(s_on, 128), comp(s_ns, 128)
+        l1 = float((0.299 * c1[:, :, 0] + 0.587 * c1[:, :, 1] + 0.114 * c1[:, :, 2])[sh_b].mean())
+        l0 = float((0.299 * c0[:, :, 0] + 0.587 * c0[:, :, 1] + 0.114 * c0[:, :, 2])[sh_b].mean())
+        min_sh_g = min(min_sh_g, (l0 - l1) / l0 * 100.0)
+
+        c1n, c0n = comp(s_ng, 128), comp(s_ns_ng, 128)
+        l1n = float((0.299 * c1n[:, :, 0] + 0.587 * c1n[:, :, 1] + 0.114 * c1n[:, :, 2])[sh_b].mean())
+        l0n = float((0.299 * c0n[:, :, 0] + 0.587 * c0n[:, :, 1] + 0.114 * c0n[:, :, 2])[sh_b].mean())
+        min_sh_ng = min(min_sh_ng, (l0n - l1n) / l0n * 100.0)
+
+    if min_r1 < 24.0 or min_r2 < 10.0 or min_r3 < 4.0:
+        errs.append(f"3-ring glow below threshold: r1={min_r1:.1f}, r2={min_r2:.1f}, r3={min_r3:.1f}")
+    if min_sh_g < 25.0 or min_sh_ng < 25.0:
+        errs.append(f"shadow drop <25%: with_glow={min_sh_g:.1f}%, noglow={min_sh_ng:.1f}%")
+
+    # Highlight unit = "word" check
+    word_mode_evs = build_render_events(
+        [{"word": "iconic", "start": 0.0, "end": 0.5}],
+        fps=30.0, style=replace(KARAOKE_POP, highlight_unit="word"),
+    )
+    if not (len(word_mode_evs) == 1 and word_mode_evs[0].window_index is None):
+        errs.append("highlight_unit='word' did not produce single solid highlight event")
+
+    # M6d Title completeness tests
+    samples = [
+        "Everything we need to eliminate each other in this arena right now",
+        "EVERYTHING WE NEED TO ELIMINATE EACH",
+        "So um welcome back guys, why nobody ever survives the final round of the",
+        "Here is the one secret nobody tells you about",
+    ]
+    for s in samples:
+        t, _ = resolve_title_and_keyword(s, hook_sentence=s, use_llm=False)
+        if not is_title_complete(t, max_words=8):
+            errs.append(f"incomplete title {t!r} from {s!r}")
+
+    return len(errs) == 0, (
+        f"rings=[{min_r1:.1f}(>=24), {min_r2:.1f}(>=10), {min_r3:.1f}(>=4)], "
+        f"shadow_drop=[glow:{min_sh_g:.1f}%, noglow:{min_sh_ng:.1f}%](>=25%), "
+        f"word_mode_ok={len(word_mode_evs)==1}, title_complete_4/4=PASS, errs={errs}"
+    )
+
+
+def _verify_j_perf(src_mp4: Path, tmp_dir: Path) -> Tuple[bool, str]:
+    """J. Performance: verifies framing detection budget <= 2.0 s per clip and zero per-frame Python."""
+    from openclip_engine.clipping.framing_engine import detect_subjects
+
+    _, backend, det_s = detect_subjects(src_mp4, 0.0, 3.2, sample_fps=4.0, use_cache=False)
+    ok = det_s <= 2.0
+    return ok, f"detect_s={det_s:.3f}s (budget <=2.0s), detector={backend}, single_process_ffmpeg=True"
+
+
 def main() -> int:
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="oc_verify_render_") as td:
@@ -702,6 +1044,18 @@ def main() -> int:
 
         checks.append(("F. Contact Sheet (every 3rd frame)", f_res[0], f_res[1]))
         checks.append(("M5. Fast vs libx264-slow-CRF18 SSIM (>=0.97)", ssim_res[0], ssim_res[1]))
+
+        ok_g, det_g = _verify_g_framing(tmp)
+        checks.append(("G. Framing (two-shot gap preserved, zero stretch, ref-matched)", ok_g, det_g))
+
+        ok_h, det_h = _verify_h_hook(tmp)
+        checks.append(("H. Hook Selection (refine_start, snap, sponsor, shuffle, schema, fallback)", ok_h, det_h))
+
+        ok_i, det_i = _verify_i_glow_shadow_title()
+        checks.append(("I. M6c/d 3-Ring Glow, Shadow Drop >=25%, Highlight-Unit & Title Completeness", ok_i, det_i))
+
+        ok_j, det_j = _verify_j_perf(src_mp4, tmp)
+        checks.append(("J. Performance (framing detection <=2s, zero per-frame Python)", ok_j, det_j))
 
     print("\n================ FULL RENDER VERIFICATION REPORT ================")
     all_pass = True

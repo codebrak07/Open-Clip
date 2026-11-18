@@ -162,6 +162,8 @@ class YtDlpClient:
         max_height: int = 1080,
         aspect_ratio: str = "9:16",
         caption_style: str = "Hormozi",
+        hook_mode: str = "balanced",
+        hook_hint: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Extracts real 1080p Full HD H.264/AAC MP4 viral clip segments directly from YouTube CDN in parallel,
@@ -216,21 +218,70 @@ class YtDlpClient:
             "status": "loaded",
         }
 
-        # Distribute clips evenly across the real video duration
-        clip_len = min(20, max(10, total_duration // max(clip_count, 1)))
-        if total_duration <= clip_len:
-            starts = [0]
-        else:
-            usable_span = max(1, total_duration - clip_len)
-            step = usable_span / max(clip_count, 1)
-            starts = [int(i * step) for i in range(clip_count)]
-
         OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
         ffmpeg_bin = FFMPEG_PATH or "ffmpeg"
 
-        def cut_and_caption_clip(idx: int, start_sec: int) -> Dict[str, Any]:
-            end_sec = min(total_duration, start_sec + clip_len)
-            seg_dur = max(5, end_sec - start_sec)
+        # M6a unified hook-aware clip selection (replaces naive even-step slicing when captions exist)
+        clip_specs: List[Dict[str, Any]] = []
+        hook_report_meta: Dict[str, Any] = {}
+        if all_cues:
+            from openclip_engine.clipping.karaoke_pop import cues_to_words
+            from openclip_engine.clipping.title_renderer import resolve_title_and_keyword
+            from openclip_engine.scoring.hook_selector import select_hook_clips
+
+            all_words = cues_to_words(all_cues)
+            selected_hooks, hook_report_meta = select_hook_clips(
+                words=all_words,
+                clip_count=clip_count,
+                min_dur=15.0,
+                max_dur=45.0,
+                hook_mode=hook_mode,
+                hook_hint=hook_hint,
+                report_dir=OUTPUTS_DIR / f"{job_id}_analysis",
+                video_label=metadata["title"],
+                use_llm=True,
+                ffmpeg_bin=ffmpeg_bin,
+            )
+            for hc in selected_hooks:
+                st = hc.refined_start if hc.refined_start is not None else hc.start
+                en = hc.refined_end if hc.refined_end is not None else hc.end
+                title_txt, _ = resolve_title_and_keyword(
+                    hc.text, hook_sentence=hc.hook_sentence, use_llm=False
+                )
+                clip_specs.append({
+                    "start_sec": max(0.0, float(st)),
+                    "end_sec": min(float(total_duration), max(float(st) + 5.0, float(en))),
+                    "hook_sentence": hc.hook_sentence,
+                    "title": title_txt,
+                    "score": int(round(min(99.0, max(50.0, hc.final_score * 10.0)))),
+                    "reason": hc.reason,
+                })
+
+        if not clip_specs:
+            # Fallback when video has no captions at all
+            clip_len = min(20, max(10, total_duration // max(clip_count, 1)))
+            if total_duration <= clip_len:
+                starts = [0]
+            else:
+                usable_span = max(1, total_duration - clip_len)
+                step = usable_span / max(clip_count, 1)
+                starts = [int(i * step) for i in range(clip_count)]
+            for st in starts:
+                clip_specs.append({
+                    "start_sec": float(st),
+                    "end_sec": float(min(total_duration, st + clip_len)),
+                    "hook_sentence": "",
+                    "title": metadata["title"],
+                    "score": 82,
+                    "reason": "Even-interval fallback (no captions track)",
+                })
+
+        metadata["hook_analysis"] = hook_report_meta
+
+        def cut_and_caption_clip(idx: int, spec: Dict[str, Any]) -> Dict[str, Any]:
+            start_sec = float(spec["start_sec"])
+            end_sec = float(spec["end_sec"])
+            seg_dur = max(5.0, end_sec - start_sec)
             clip_id = f"{job_id}_clip_{idx + 1}"
             raw_path = OUTPUTS_DIR / f".raw_{clip_id}.mp4"
             out_path = OUTPUTS_DIR / f"{clip_id}.mp4"
@@ -242,7 +293,7 @@ class YtDlpClient:
                     cmd = [
                         ffmpeg_bin, "-y", "-loglevel", "error",
                         "-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "2",
-                        "-ss", str(start_sec), "-t", str(seg_dur), "-i", vid_url,
+                        "-ss", f"{start_sec:.3f}", "-t", f"{seg_dur:.3f}", "-i", vid_url,
                         "-c", "copy", "-movflags", "+faststart",
                         str(raw_path),
                     ]
@@ -250,9 +301,9 @@ class YtDlpClient:
                     cmd = [
                         ffmpeg_bin, "-y", "-loglevel", "error",
                         "-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "2",
-                        "-ss", str(start_sec), "-t", str(seg_dur), "-i", vid_url,
+                        "-ss", f"{start_sec:.3f}", "-t", f"{seg_dur:.3f}", "-i", vid_url,
                         "-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "2",
-                        "-ss", str(start_sec), "-t", str(seg_dur), "-i", aud_url,
+                        "-ss", f"{start_sec:.3f}", "-t", f"{seg_dur:.3f}", "-i", aud_url,
                         "-map", "0:v:0", "-map", "1:a:0",
                         "-c", "copy", "-shortest", "-movflags", "+faststart",
                         str(raw_path),
@@ -269,7 +320,7 @@ class YtDlpClient:
                     write_vtt(clip_cues, vtt_path)
                     sub_path_str = str(vtt_path)
 
-                # 3. Smart-reframe to full 1080p target aspect ratio + burn crisp styled captions
+                # 3. Smart-reframe / M6 framing + burnt-in captions + M6d complete title
                 build_reframe_and_caption_clip(
                     raw_clip_path=raw_path,
                     final_clip_path=out_path,
@@ -280,14 +331,20 @@ class YtDlpClient:
                     raw_all_cues=all_cues,
                     clip_start=float(start_sec),
                     clip_end=float(end_sec),
+                    hook_sentence=spec.get("hook_sentence") or None,
+                    title=spec.get("title") or None,
                 )
 
                 transcript_text = " ".join(c["text"] for c in clip_cues)[:160]
                 return {
                     "index": idx,
                     "id": clip_id,
-                    "start_time": start_sec,
-                    "end_time": end_sec,
+                    "start_time": round(start_sec, 2),
+                    "end_time": round(end_sec, 2),
+                    "title": spec.get("title") or metadata["title"],
+                    "score": int(spec.get("score", 85)),
+                    "hook_sentence": spec.get("hook_sentence") or "",
+                    "hook_rationale": spec.get("reason") or "",
                     "output_path": str(out_path),
                     "subtitles_path": sub_path_str,
                     "captions_count": len(clip_cues),
@@ -298,9 +355,9 @@ class YtDlpClient:
                 raw_path.unlink(missing_ok=True)
 
         extracted: List[Dict[str, Any]] = []
-        max_workers = min(4, clip_count)
+        max_workers = min(4, len(clip_specs))
         with ThreadPoolExecutor(max_workers=max_workers) as pool:
-            futures = {pool.submit(cut_and_caption_clip, idx, st): idx for idx, st in enumerate(starts)}
+            futures = {pool.submit(cut_and_caption_clip, idx, sp): idx for idx, sp in enumerate(clip_specs)}
             for fut in as_completed(futures):
                 extracted.append(fut.result())
 

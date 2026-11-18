@@ -328,7 +328,26 @@ def build_render_events(
         is_emph, chunks = classify_word_chunks(word, style)
         word_dur = en - st
 
-        if is_emph and len(chunks) >= 2 and word_dur >= 2 * frame_dur:
+        if is_emph and style.highlight_unit == "word":
+            # M6c highlight_unit="word": emphasis word renders as one solid highlight color
+            main_color = _pick_deterministic_color(
+                style.emphasis_window_colors,
+                prev_main_color,
+                w_idx,
+                style.color_seed,
+            )
+            prev_main_color = main_color
+            events.append(RenderEvent(
+                word_index=w_idx,
+                word=word,
+                chunks=[word],
+                window_index=None,
+                main_color_name=main_color,
+                start=st,
+                end=en,
+                is_emphasis=True,
+            ))
+        elif is_emph and len(chunks) >= 2 and word_dur >= 2 * frame_dur:
             main_color = _pick_deterministic_color(
                 style.emphasis_window_colors,
                 prev_main_color,
@@ -506,6 +525,120 @@ def build_two_layer_glow(
     tight_a = np.clip(np.minimum(255.0, tight_blur * tight_gain) * tight_alpha, 0, 255).astype(np.uint8)
 
     return _make_colored_layer(rgb, wide_a), _make_colored_layer(rgb, tight_a)
+
+
+def build_three_layer_glow(
+    mask_u8: np.ndarray,
+    rgb: Tuple[int, int, int],
+    scale: float,
+    style: CaptionStyle,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    M6c 3-layer glow in pure saturated `rgb` (normal alpha-over, never screen/add):
+      - HALO : sigma 26 * scale * glow_spread_scale, alpha 0.35 * glow_alpha_scale
+      - WIDE : sigma 16 * scale * glow_spread_scale, alpha 0.80 * glow_alpha_scale
+      - TIGHT: sigma 4  * scale * glow_spread_scale, alpha 0.75 * glow_alpha_scale
+    """
+    sp = scale * style.glow_spread_scale
+    al = style.glow_alpha_scale
+    dil_k = int(round(style.glow_dilate_px * scale))
+    if dil_k >= 3:
+        if dil_k % 2 == 0:
+            dil_k += 1
+        dil_mask = _separable_max_filter_2d(mask_u8, dil_k)
+    else:
+        dil_mask = mask_u8
+
+    halo_blur = _blur_mask_2d(dil_mask, style.halo_glow_sigma_1080 * sp).astype(np.float32)
+    halo_a = np.clip(np.minimum(255.0, halo_blur * style.halo_glow_gain) * (style.halo_glow_alpha * al), 0, 255).astype(np.uint8)
+
+    wide_blur = _blur_mask_2d(dil_mask, style.wide_glow_sigma_1080 * sp).astype(np.float32)
+    wide_a = np.clip(np.minimum(255.0, wide_blur * style.wide_glow_gain) * (style.wide_glow_alpha * al), 0, 255).astype(np.uint8)
+
+    tight_blur = _blur_mask_2d(mask_u8, style.tight_glow_sigma_1080 * sp).astype(np.float32)
+    tight_a = np.clip(np.minimum(255.0, tight_blur * style.tight_glow_gain) * (style.tight_glow_alpha * al), 0, 255).astype(np.uint8)
+
+    return (
+        _make_colored_layer(rgb, halo_a),
+        _make_colored_layer(rgb, wide_a),
+        _make_colored_layer(rgb, tight_a),
+    )
+
+
+def _build_three_layer_shadow(
+    roi_w: int,
+    roi_h: int,
+    local_x: int,
+    local_y: int,
+    word: str,
+    font: Any,
+    scale: float,
+    style: CaptionStyle,
+) -> np.ndarray:
+    """
+    M6c 3-layer bottom shadow (all scaled by W/1080 and shadow_scale):
+      1. Ambient dark halo: sigma 14, alpha 0.35, offset (0, +4)
+      2. Drop shadow:       sigma 3.0, alpha 0.85, offset (+5, +7)
+      3. Contact shadow:    sigma 1.0, alpha 0.60, offset (+2, +3)
+    """
+    if not style.shadow_enabled or style.shadow_scale <= 0.0:
+        return np.zeros((roi_h, roi_w, 4), dtype=np.uint8)
+
+    ss = style.shadow_scale
+    # Base glyph silhouette drawn once at (local_x, local_y) -> shifted by integer slices for speed
+    base_img = Image.new("L", (roi_w, roi_h), 0)
+    ImageDraw.Draw(base_img).text((local_x, local_y), word, font=font, fill=255)
+    base_m = np.array(base_img, dtype=np.uint8)
+
+    def _shift_mask(m: np.ndarray, dx: int, dy: int) -> np.ndarray:
+        out = np.zeros_like(m)
+        sy0 = max(0, -dy)
+        dy0 = max(0, dy)
+        h_cp = roi_h - abs(dy)
+        sx0 = max(0, -dx)
+        dx0 = max(0, dx)
+        w_cp = roi_w - abs(dx)
+        if h_cp > 0 and w_cp > 0:
+            out[dy0 : dy0 + h_cp, dx0 : dx0 + w_cp] = m[sy0 : sy0 + h_cp, sx0 : sx0 + w_cp]
+        return out
+
+    # 1. Ambient dark halo
+    amb_m = _shift_mask(
+        base_m,
+        int(round(style.ambient_shadow_offset_x_1080 * scale)),
+        int(round(style.ambient_shadow_offset_y_1080 * scale)),
+    )
+    amb_blur = _blur_mask_2d(amb_m, style.ambient_shadow_sigma_1080 * scale).astype(np.float32)
+    amb_a = np.clip(np.minimum(255.0, amb_blur * style.ambient_shadow_gain) * (style.ambient_shadow_alpha * ss), 0, 255).astype(np.uint8)
+    comp = _make_colored_layer(style.shadow_color, amb_a)
+
+    # 2. Drop shadow (dilated slightly for grounded serif shadow presence)
+    sh_dil_k = int(round(style.shadow_dilate_px * scale))
+    if sh_dil_k >= 3:
+        if sh_dil_k % 2 == 0:
+            sh_dil_k += 1
+        drop_src = _separable_max_filter_2d(base_m, sh_dil_k)
+    else:
+        drop_src = base_m
+    drop_m = _shift_mask(
+        drop_src,
+        int(round(style.shadow_offset_x_1080 * scale)),
+        int(round(style.shadow_offset_y_1080 * scale)),
+    )
+    drop_blur = _blur_mask_2d(drop_m, style.shadow_blur_sigma * scale).astype(np.float32)
+    drop_a = np.clip(np.minimum(255.0, drop_blur * style.shadow_gain) * (style.shadow_alpha * ss), 0, 255).astype(np.uint8)
+    comp = _alpha_over(comp, _make_colored_layer(style.shadow_color, drop_a))
+
+    # 3. Contact shadow
+    con_m = _shift_mask(
+        base_m,
+        int(round(style.contact_shadow_offset_x_1080 * scale)),
+        int(round(style.contact_shadow_offset_y_1080 * scale)),
+    )
+    con_blur = _blur_mask_2d(con_m, style.contact_shadow_sigma_1080 * scale).astype(np.float32)
+    con_a = np.clip(con_blur * (style.contact_shadow_alpha * ss), 0, 255).astype(np.uint8)
+    comp = _alpha_over(comp, _make_colored_layer(style.shadow_color, con_a))
+    return comp
 
 
 def horizontal_gaussian_blur_1d(arr: np.ndarray, sigma_x: float) -> np.ndarray:
@@ -703,8 +836,8 @@ def _render_sharp_base(
     sh_dx = int(round(style.shadow_offset_x_1080 * scale))
     sh_dy = int(round(style.shadow_offset_y_1080 * scale))
     dil_px = int(round(style.glow_dilate_px * scale))
-    wide_sigma = style.wide_glow_sigma_1080 * scale
-    pad_xy = max(36, int(math.ceil(wide_sigma * 3.8)) + dil_px + max(abs(sh_dx), abs(sh_dy)) + 8)
+    halo_sigma = style.halo_glow_sigma_1080 * scale * style.glow_spread_scale
+    pad_xy = max(64, int(math.ceil(halo_sigma * 3.2)) + dil_px + max(abs(sh_dx), abs(sh_dy)) + 10)
 
     gx0 = start_x + word_bbox[0]
     gy0 = draw_y + word_bbox[1]
@@ -724,12 +857,8 @@ def _render_sharp_base(
     main_rgb = style.palette[ev.main_color_name]
     white_rgb = style.palette[style.emphasis_base_color]
 
-    # Build clean per-color alpha masks + drop shadow mask
-    shadow_mask_img = Image.new("L", (roi_w, roi_h), 0)
-    ImageDraw.Draw(shadow_mask_img).text((local_x + sh_dx, local_y + sh_dy), ev.word, font=font, fill=255)
-    sh_blur = _blur_mask_2d(np.array(shadow_mask_img, dtype=np.uint8), style.shadow_blur_sigma * scale)
-    sh_alpha = np.clip(sh_blur.astype(np.float32) * style.shadow_alpha, 0, 255).astype(np.uint8)
-    comp = _make_colored_layer(style.shadow_color, sh_alpha)
+    # Bottom layers: M6c 3-layer shadow (ambient dark halo + drop shadow + contact shadow)
+    comp = _build_three_layer_shadow(roi_w, roi_h, local_x, local_y, ev.word, font, scale, style)
 
     if ev.window_index is None:
         glyph_mask_img = Image.new("L", (roi_w, roi_h), 0)
@@ -737,12 +866,8 @@ def _render_sharp_base(
         g_mask = np.array(glyph_mask_img, dtype=np.uint8)
 
         if style.glow_enabled:
-            wide_gl, tight_gl = build_two_layer_glow(
-                g_mask, main_rgb, scale,
-                style.wide_glow_sigma_1080, style.wide_glow_alpha, style.wide_glow_gain,
-                style.tight_glow_sigma_1080, style.tight_glow_alpha, style.tight_glow_gain,
-                style.glow_dilate_px,
-            )
+            halo_gl, wide_gl, tight_gl = build_three_layer_glow(g_mask, main_rgb, scale, style)
+            comp = _alpha_over(comp, halo_gl)
             comp = _alpha_over(comp, wide_gl)
             comp = _alpha_over(comp, tight_gl)
 
@@ -766,19 +891,10 @@ def _render_sharp_base(
         c_mask = np.array(win_mask_img, dtype=np.uint8)
 
         if style.glow_enabled:
-            w_wide, w_tight = build_two_layer_glow(
-                w_mask, white_rgb, scale,
-                style.wide_glow_sigma_1080, style.wide_glow_alpha, style.wide_glow_gain,
-                style.tight_glow_sigma_1080, style.tight_glow_alpha, style.tight_glow_gain,
-                style.glow_dilate_px,
-            )
-            c_wide, c_tight = build_two_layer_glow(
-                c_mask, main_rgb, scale,
-                style.wide_glow_sigma_1080, style.wide_glow_alpha, style.wide_glow_gain,
-                style.tight_glow_sigma_1080, style.tight_glow_alpha, style.tight_glow_gain,
-                style.glow_dilate_px,
-            )
-            # Composite wide glows then tight glows (normal alpha-over)
+            w_halo, w_wide, w_tight = build_three_layer_glow(w_mask, white_rgb, scale, style)
+            c_halo, c_wide, c_tight = build_three_layer_glow(c_mask, main_rgb, scale, style)
+            comp = _alpha_over(comp, w_halo)
+            comp = _alpha_over(comp, c_halo)
             comp = _alpha_over(comp, w_wide)
             comp = _alpha_over(comp, c_wide)
             comp = _alpha_over(comp, w_tight)
@@ -812,10 +928,10 @@ def render_event_sprite(
 # ─────────────────────── Sprite Factory (Memory + Disk Cache + ffconcat) ───────────────────────
 def _style_fingerprint(style: CaptionStyle) -> str:
     payload = (
-        f"v2|{style.font_size_pct:.4f}|{style.anchor_x_pct:.4f}|{style.glow_enabled}|"
-        f"{style.glow_dilate_px}|{style.wide_glow_sigma_1080}|{style.wide_glow_alpha}|{style.wide_glow_gain}|"
-        f"{style.tight_glow_sigma_1080}|{style.tight_glow_alpha}|{style.tight_glow_gain}|"
-        f"{style.smear_phase1_sigma_x_1080}|{style.smear_phase1_scale_x}|{style.smear_echo}"
+        f"v3|{style.font_size_pct:.4f}|{style.anchor_x_pct:.4f}|{style.glow_enabled}|"
+        f"{style.glow_spread_scale:.3f}|{style.glow_alpha_scale:.3f}|{style.shadow_enabled}|{style.shadow_scale:.3f}|"
+        f"{style.glow_dilate_px}|{style.halo_glow_sigma_1080}|{style.wide_glow_sigma_1080}|{style.tight_glow_sigma_1080}|"
+        f"{style.smear_phase1_sigma_x_1080}|{style.smear_phase1_scale_x}|{style.smear_echo}|{style.highlight_unit}"
     )
     return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:10]
 
@@ -837,7 +953,7 @@ def ensure_empty_sprite(width: int, strip_h: int, cache_dir: Path) -> Path:
     p = cache_dir / f"empty_{width}x{strip_h}.png"
     if not p.exists():
         img = Image.new("RGBA", (width, strip_h), (0, 0, 0, 0))
-        tmp = p.with_suffix(".tmp.png")
+        tmp = cache_dir / f".empty_{width}x{strip_h}.{os.getpid()}.{threading.get_ident()}.tmp.png"
         img.save(tmp, format="PNG", compress_level=1)
         os.replace(tmp, p)
     return p
@@ -1166,6 +1282,7 @@ def build_karaoke_pop_clip(
     ffmpeg_bin: str = "ffmpeg",
     style: CaptionStyle = KARAOKE_POP,
     title: Optional[str] = None,
+    hook_sentence: Optional[str] = None,
     sfx_mode: str = "rules",
     quality: str = "balanced",
 ) -> Path:
@@ -1195,6 +1312,7 @@ def build_karaoke_pop_clip(
             clip_start=clip_start,
             clip_end=clip_end,
             title=title,
+            hook_sentence=hook_sentence,
             layout=layout,
             caption_style=style,
             sfx_config=sfx_cfg,

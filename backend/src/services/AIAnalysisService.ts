@@ -1,4 +1,8 @@
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
 import { ProviderRegistry } from './ProviderRegistry';
+import { PythonEngineBridge } from './PythonEngineBridge';
 import { TranscriptionResult } from './TranscriptionService';
 
 export interface CandidateClip {
@@ -7,18 +11,67 @@ export interface CandidateClip {
   end_time: number;   // in seconds
   score: number;      // 0 to 100
   hook_rationale: string;
+  hook_sentence?: string;
+  analysis_report_json?: string;
 }
 
 export class AIAnalysisService {
   /**
-   * Identifies candidate short clips from a transcription using LLM API.
+   * Identifies candidate short clips from a transcription via the unified M6a Python
+   * hook-selection pipeline (`select-hooks`), with legacy TS LLM fallback.
    */
   static async analyzeTranscript(
     transcript: TranscriptionResult,
     providerName: string,
     apiKey?: string,
-    apiBase?: string
+    apiBase?: string,
+    options?: { clipCount?: number; hookMode?: 'strict' | 'balanced' | 'loose'; hookHint?: string }
   ): Promise<CandidateClip[]> {
+    // 1. Unified M6a Hook-Aware Selection Pipeline (shared by CLI & Backend)
+    try {
+      const words = (transcript.words && transcript.words.length > 0)
+        ? transcript.words
+        : transcript.segments.flatMap((seg) => {
+            const toks = seg.text.trim().split(/\s+/).filter(Boolean);
+            const span = Math.max(0.1, seg.end - seg.start);
+            return toks.map((w, i) => ({
+              word: w,
+              start: seg.start + (span * i) / toks.length,
+              end: seg.start + (span * (i + 1)) / toks.length,
+            }));
+          });
+
+      if (words.length > 0) {
+        const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'oc_hooks_'));
+        const wordsFile = path.join(tmpDir, 'words.json');
+        fs.writeFileSync(wordsFile, JSON.stringify(words), 'utf-8');
+        const args = [
+          'select-hooks',
+          wordsFile,
+          '--clip-count', String(options?.clipCount ?? 5),
+          '--hook-mode', options?.hookMode ?? 'balanced',
+          '--report-dir', tmpDir,
+        ];
+        if (options?.hookHint) {
+          args.push('--hook-hint', options.hookHint);
+        }
+        const res = await PythonEngineBridge.runCommand(args);
+        if (res && Array.isArray(res.clips) && res.clips.length > 0) {
+          return res.clips.map((c: any) => ({
+            title: String(c.hook_sentence || 'Viral Hook Clip').slice(0, 80),
+            start_time: Number(c.refined_start ?? c.start ?? 0),
+            end_time: Number(c.refined_end ?? c.end ?? 20),
+            score: Math.min(100, Math.max(0, Math.round(Number(c.final_score ?? 7.5) * 10))),
+            hook_rationale: String(c.reason || ''),
+            hook_sentence: String(c.hook_sentence || ''),
+            analysis_report_json: res.meta?.analysis_report_json,
+          }));
+        }
+      }
+    } catch (err: any) {
+      console.warn('[AIAnalysisService] Unified M6a Python hook selector unavailable, falling back to TS provider:', err?.message);
+    }
+
     const provider = ProviderRegistry.getProvider(providerName);
 
     // Format transcript segments with line numbers or timestamps to help the LLM target exact timings

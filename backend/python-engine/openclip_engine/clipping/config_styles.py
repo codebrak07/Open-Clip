@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, Tuple
+from typing import Dict, Optional, Tuple
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
 ASSETS_FONTS_DIR = REPO_ROOT / "assets" / "fonts"
@@ -50,8 +50,17 @@ class LayoutStyle:
     unsharp_cy: int = 5
     unsharp_ca: float = 0.0
 
-    # Optional visual features (default off)
-    smart_crop: bool = False
+    # Optional visual features (M6b framing supersedes legacy --smart-crop)
+    framing_mode: str = "auto"       # "auto" | "off" | "ref"
+    multi_subject_layout: str = "two_shot"  # "two_shot" (gap-preserving) | "split" (stacked)
+    framing_preset: Optional[str] = None    # e.g. "two_shot_gap"
+    framing_ref_path: Optional[str] = None  # reference image/video (default reference/framing_ref.*)
+    subjects_json_path: Optional[str] = None  # optional test override boxes JSON
+    framing_min_shot_s: float = 0.8
+    framing_ema_alpha: float = 0.15
+    framing_two_shot_margin: float = 0.08
+    framing_feather_px: int = 24
+    smart_crop: bool = False         # legacy alias; superseded by framing_mode
     smart_crop_fps: float = 4.0
     smart_crop_ema_alpha: float = 0.15
     smart_crop_max_pan_px_s: float = 240.0
@@ -107,7 +116,7 @@ class CaptionStyle:
     max_word_width_pct: float = 0.90        # shrink to fit if word exceeds 0.9*W
     anchor_x_pct: float = 0.48              # horizontal center 0.48*W
     center_y_pct: float = 0.54              # window_top + 0.54*window_h (1069 on default 9:16)
-    strip_height_font_mult: float = 3.0     # strip = W x ~3*font_px (~330px at 1080w)
+    strip_height_font_mult: float = 3.5     # generous strip (~386px at 1080w) so 44px halo never clips
 
     # Fonts (Times New Roman Regular primary; Tinos/Liberation Serif bundled fallback; NEVER bold)
     font_paths: Tuple[str, ...] = (
@@ -130,23 +139,44 @@ class CaptionStyle:
     emphasis_window_colors: Tuple[str, ...] = ("green", "yellow")
     emphasis_base_color: str = "white"
 
-    # Layer 1: Drop shadow (black, alpha 0.7, offset (+3,+4)*(W/1080), sigma 1.5)
+    # M6c: 3-Layer Shadow (bottom layers, all scaled by W/1080 and shadow_scale)
+    shadow_enabled: bool = True
+    shadow_scale: float = 1.0
     shadow_color: Tuple[int, int, int] = (0, 0, 0)
-    shadow_alpha: float = 0.70
-    shadow_offset_x_1080: float = 3.0
-    shadow_offset_y_1080: float = 4.0
-    shadow_blur_sigma: float = 1.5
+    shadow_dilate_px: int = 3
+    ambient_shadow_sigma_1080: float = 14.0
+    ambient_shadow_alpha: float = 0.35
+    ambient_shadow_offset_x_1080: float = 0.0
+    ambient_shadow_offset_y_1080: float = 4.0
+    ambient_shadow_gain: float = 2.8
+    shadow_offset_x_1080: float = 5.0
+    shadow_offset_y_1080: float = 7.0
+    shadow_blur_sigma: float = 3.0
+    shadow_alpha: float = 0.85
+    shadow_gain: float = 2.6
+    contact_shadow_offset_x_1080: float = 2.0
+    contact_shadow_offset_y_1080: float = 3.0
+    contact_shadow_sigma_1080: float = 1.0
+    contact_shadow_alpha: float = 0.60
 
-    # Layer 2 & 3: Two-layer normal alpha-over glow in saturated word color
-    # Wide glow: sigma ~9px, alpha 0.65; Tight glow: sigma ~3px, alpha 0.90
+    # M6c: 3-Layer Glow in word's own pure color (normal alpha-over, NEVER screen/add)
+    # HALO sigma 26 alpha 0.35 | WIDE sigma 16 alpha 0.80 | TIGHT sigma 4 alpha 0.75
     glow_enabled: bool = True
-    glow_dilate_px: int = 5                 # compensates thin serif strokes so 4-14px ring stays bold
-    wide_glow_sigma_1080: float = 9.0
-    wide_glow_alpha: float = 0.65
-    wide_glow_gain: float = 2.6             # normalizes Gaussian spread on thin serifs before capping at wide_glow_alpha
-    tight_glow_sigma_1080: float = 3.0
-    tight_glow_alpha: float = 0.90
-    tight_glow_gain: float = 2.0
+    glow_spread_scale: float = 1.0
+    glow_alpha_scale: float = 1.0
+    glow_dilate_px: int = 3                 # compensates thin serif strokes without making glow opaque
+    halo_glow_sigma_1080: float = 26.0
+    halo_glow_alpha: float = 0.35
+    halo_glow_gain: float = 7.2
+    wide_glow_sigma_1080: float = 16.0
+    wide_glow_alpha: float = 0.80
+    wide_glow_gain: float = 0.85
+    tight_glow_sigma_1080: float = 4.0
+    tight_glow_alpha: float = 0.75
+    tight_glow_gain: float = 0.55
+
+    # M6c: Highlight unit switch ("syllable" | "word")
+    highlight_unit: str = "syllable"
 
     # Entrance smear (time-based, fps-independent; same strength for every word & highlight step)
     smear_phase1_ms: float = 33.34          # 0-33ms

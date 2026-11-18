@@ -1,0 +1,8 @@
+{
+  "venvPath": "backend/python-engine",
+  "venv": ".venv",
+  "extraPaths": ["backend/python-engine"],
+  "include": ["backend/python-engine/openclip_engine", "tools"],
+  "pythonVersion": "3.13",
+  "reportMissingTypeStubs": false
+}

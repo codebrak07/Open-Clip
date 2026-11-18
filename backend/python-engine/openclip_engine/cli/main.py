@@ -99,8 +99,10 @@ def extract_clips(
     clip_count: int = 5,
     aspect_ratio: str = "9:16",
     caption_style: str = "Hormozi",
+    hook_mode: str = typer.Option("balanced", "--hook-mode", help="Hook mode: strict | balanced | loose"),
+    hook_hint: Optional[str] = typer.Option(None, "--hook-hint", help="Words describing the target hook moment"),
 ):
-    """Extracts multiple real 1080p HD MP4 clips in parallel with smart reframe and burnt-in captions."""
+    """Extracts multiple real 1080p HD MP4 clips in parallel using M6a hook selection, M6b framing, and burnt-in captions."""
     result = YtDlpClient.extract_clips_parallel(
         url,
         job_id=job_id,
@@ -108,8 +110,50 @@ def extract_clips(
         max_height=1080,
         aspect_ratio=aspect_ratio,
         caption_style=caption_style,
+        hook_mode=hook_mode,
+        hook_hint=hook_hint,
     )
     print(json.dumps(result))
+
+
+@app.command(name="select-hooks")
+def select_hooks_cmd(
+    words_json: str,
+    clip_count: int = typer.Option(3, "--clip-count", help="Number of hook clips to select"),
+    min_dur: float = typer.Option(15.0, "--min-dur", help="Minimum clip duration in seconds"),
+    max_dur: float = typer.Option(60.0, "--max-dur", help="Maximum clip duration in seconds"),
+    hook_mode: str = typer.Option("balanced", "--hook-mode", help="strict | balanced | loose"),
+    hook_hint: Optional[str] = typer.Option(None, "--hook-hint", help="Words describing the hook moment"),
+    start: Optional[float] = typer.Option(None, "--start", help="Manual start override (seconds)"),
+    end: Optional[float] = typer.Option(None, "--end", help="Manual end override (seconds)"),
+    video_in: Optional[str] = typer.Option(None, "--video", help="Optional video file for audio energy/scene signals"),
+    report_dir: Optional[str] = typer.Option(None, "--report-dir", help="Directory for analysis_report.json & hook_debug.md"),
+    explain: bool = typer.Option(False, "--explain", help="Print human-readable hook selection summary"),
+    no_llm: bool = typer.Option(False, "--no-llm", help="Force rules-only hook scoring"),
+):
+    """Runs the M6a hook-aware clip selection pipeline and emits transparent reports."""
+    from dataclasses import asdict as dc_asdict
+    from openclip_engine.scoring.hook_selector import format_explain_summary, select_hook_clips
+
+    words = json.loads(Path(words_json).read_text(encoding="utf-8"))
+    out_dir = Path(report_dir) if report_dir else Path(words_json).resolve().parent
+    selected, meta = select_hook_clips(
+        words=words,
+        clip_count=clip_count,
+        min_dur=min_dur,
+        max_dur=max_dur,
+        hook_mode=hook_mode,
+        hook_hint=hook_hint,
+        manual_start=start,
+        manual_end=end,
+        video_path=Path(video_in) if video_in else None,
+        report_dir=out_dir,
+        video_label=Path(video_in).name if video_in else Path(words_json).stem,
+        use_llm=not no_llm,
+    )
+    if explain:
+        print(format_explain_summary(selected, meta.get("providers_used") or [], Path(meta["analysis_report_json"]) if meta.get("analysis_report_json") else None))
+    print(json.dumps({"meta": meta, "clips": [dc_asdict(c) for c in selected]}, indent=2))
 
 
 @app.command(name="caption")
@@ -142,24 +186,36 @@ def render_clip_cmd(
     video_in: str,
     words_json: str,
     out_path: str,
-    clip_start: float = typer.Option(0.0, "--clip-start", help="Clip start in source seconds"),
-    clip_end: Optional[float] = typer.Option(None, "--clip-end", help="Clip end in source seconds"),
+    clip_start: Optional[float] = typer.Option(None, "--clip-start", "--start", help="Clip start in source seconds (auto-selects hook if omitted)"),
+    clip_end: Optional[float] = typer.Option(None, "--clip-end", "--end", help="Clip end in source seconds"),
     title: Optional[str] = typer.Option(None, "--title", help="Explicit main title (else LLM + fallback)"),
     keyword: Optional[str] = typer.Option(None, "--keyword", help="Highlighted yellow keyword in title"),
     video_aspect: str = typer.Option("4:5", "--video-aspect", help="Video window aspect: 4:5 or 3:4"),
     fit_mode: str = typer.Option("cover", "--fit-mode", help="Window fit: cover or contain"),
-    smart_crop: bool = typer.Option(False, "--smart-crop", help="Enable 4fps OpenCV face-tracked crop"),
+    framing: str = typer.Option("auto", "--framing", help="Framing engine: auto | off | ref"),
+    framing_ref: Optional[str] = typer.Option(None, "--framing-ref", help="Reference image/video for matched framing"),
+    framing_preset: Optional[str] = typer.Option(None, "--framing-preset", help="Preset e.g. two_shot_gap"),
+    multi_subject_layout: str = typer.Option("two_shot", "--multi-subject-layout", help="two_shot | split"),
+    subjects_json: Optional[str] = typer.Option(None, "--subjects-json", help="Inject detected subject boxes JSON"),
+    smart_crop: bool = typer.Option(False, "--smart-crop", help="Legacy alias for --framing auto"),
     subject_pop: bool = typer.Option(False, "--subject-pop", help="Enable optional MediaPipe subject brightness pop"),
     plain_4_5: bool = typer.Option(False, "--plain-4-5", help="Export plain 1080x1350 4:5 (blur=off, title=off)"),
     smear_echo: bool = typer.Option(False, "--smear-echo", help="Enable horizontal echo ghosts during smear"),
+    highlight_unit: str = typer.Option("syllable", "--highlight-unit", help="Emphasis highlight unit: syllable | word"),
+    glow_spread_scale: float = typer.Option(1.0, "--glow-spread-scale", help="Glow spread multiplier"),
+    glow_alpha_scale: float = typer.Option(1.0, "--glow-alpha-scale", help="Glow alpha multiplier"),
+    shadow_scale: float = typer.Option(1.0, "--shadow-scale", help="Shadow alpha multiplier"),
     sfx_mode: str = typer.Option("rules", "--sfx-mode", help="SFX mode: rules | llm | off"),
     sfx_dir: Optional[str] = typer.Option(None, "--sfx-dir", help="SFX library folder (default assets/sfx)"),
     sfx_seed: int = typer.Option(42, "--sfx-seed", help="Deterministic SFX random seed"),
     sfx_master_db: float = typer.Option(0.0, "--sfx-master-db", help="Master SFX gain offset in dB"),
+    hook_mode: str = typer.Option("balanced", "--hook-mode", help="Auto hook selection mode: strict | balanced | loose"),
+    hook_hint: Optional[str] = typer.Option(None, "--hook-hint", help="Hook hint phrase"),
+    explain: bool = typer.Option(False, "--explain", help="Print hook selection explanation"),
     quality: str = typer.Option("balanced", "--quality", help="Encode quality: fast | balanced | max"),
     jobs: str = typer.Option("auto", "--jobs", help="Parallel worker count or 'auto'"),
 ):
-    """Renders a polished 9:16 vertical clip (4:5 window on blurred canvas, grade, Karaoke Pop captions, title, SFX)."""
+    """Renders a polished 9:16 vertical clip (M1-M6: hook selection, multi-subject framing, 3-layer glow/shadow captions, title, SFX)."""
     from dataclasses import replace as dc_replace
     from openclip_engine.clipping.clip_renderer import render_polished_clip
     from openclip_engine.clipping.config_styles import (
@@ -168,18 +224,52 @@ def render_clip_cmd(
         KARAOKE_POP,
         PLAIN_4_5_LAYOUT,
     )
+    from openclip_engine.scoring.hook_selector import format_explain_summary, select_hook_clips
 
     words = json.loads(Path(words_json).read_text(encoding="utf-8"))
+    eff_start = 0.0 if clip_start is None else clip_start
+    eff_end = clip_end
+    hook_sentence: Optional[str] = None
+
+    if clip_start is None and words:
+        selected, hmeta = select_hook_clips(
+            words=words,
+            clip_count=1,
+            hook_mode=hook_mode,
+            hook_hint=hook_hint,
+            video_path=Path(video_in),
+            report_dir=Path(out_path).resolve().parent,
+            video_label=Path(video_in).name,
+        )
+        if selected:
+            eff_start = selected[0].refined_start if selected[0].refined_start is not None else selected[0].start
+            eff_end = selected[0].refined_end if selected[0].refined_end is not None else selected[0].end
+            hook_sentence = selected[0].hook_sentence
+            if explain:
+                print(format_explain_summary(selected, hmeta.get("providers_used") or [], Path(hmeta["analysis_report_json"]) if hmeta.get("analysis_report_json") else None))
+
     base_layout = PLAIN_4_5_LAYOUT if plain_4_5 else DEFAULT_LAYOUT
     layout = dc_replace(
         base_layout,
         video_aspect=video_aspect,
         fit_mode=fit_mode,
+        framing_mode="ref" if framing_ref else framing,
+        framing_ref_path=framing_ref,
+        framing_preset=framing_preset,
+        multi_subject_layout=multi_subject_layout,
+        subjects_json_path=subjects_json,
         smart_crop=smart_crop,
         subject_pop=subject_pop,
         quality=quality,
     )
-    cap_style = dc_replace(KARAOKE_POP, smear_echo=smear_echo)
+    cap_style = dc_replace(
+        KARAOKE_POP,
+        smear_echo=smear_echo,
+        highlight_unit=highlight_unit,
+        glow_spread_scale=glow_spread_scale,
+        glow_alpha_scale=glow_alpha_scale,
+        shadow_scale=shadow_scale,
+    )
     sfx_cfg = dc_replace(
         DEFAULT_SFX_CONFIG,
         mode=sfx_mode,
@@ -191,13 +281,15 @@ def render_clip_cmd(
         video_in=video_in,
         words=words,
         out_path=out_path,
-        clip_start=clip_start,
-        clip_end=clip_end,
+        clip_start=eff_start,
+        clip_end=eff_end,
         title=title,
         keyword=keyword,
+        hook_sentence=hook_sentence,
         layout=layout,
         caption_style=cap_style,
         sfx_config=sfx_cfg,
+        write_framing_debug=True,
         return_meta=True,
     )
     print(json.dumps(meta, indent=2))

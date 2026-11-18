@@ -185,10 +185,11 @@ router.post('/jobs/youtube/import', async (req, res) => {
     for (let i = 0; i < extracted.clips.length; i++) {
       const seg = extracted.clips[i];
       const template = candidateTemplates[i % candidateTemplates.length];
-      const score = Math.max(78, 97 - i * 2);
-      const rationale = seg.transcript_preview
-        ? `"${seg.transcript_preview}" — ${template.rationale}`
-        : template.rationale;
+      const score = typeof seg.score === 'number' ? seg.score : Math.max(78, 97 - i * 2);
+      const clipTitle = seg.title && seg.title.trim() ? seg.title.trim() : template.title;
+      const rationale = seg.hook_rationale && seg.hook_rationale.trim()
+        ? (seg.hook_sentence ? `"${seg.hook_sentence}" — ${seg.hook_rationale}` : seg.hook_rationale)
+        : (seg.transcript_preview ? `"${seg.transcript_preview}" — ${template.rationale}` : template.rationale);
 
       insertClip.run(
         seg.id,
@@ -196,7 +197,7 @@ router.post('/jobs/youtube/import', async (req, res) => {
         seg.start_time,
         seg.end_time,
         score,
-        template.title,
+        clipTitle,
         rationale,
         seg.output_path,
         seg.subtitles_path || null

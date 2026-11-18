@@ -1,0 +1,4 @@
+search-path = ["backend/python-engine"]
+python-interpreter-path = "backend/python-engine/.venv/bin/python"
+python-version = "3.13"
+project-includes = ["backend/python-engine/openclip_engine", "tools"]

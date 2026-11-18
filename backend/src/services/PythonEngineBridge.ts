@@ -128,6 +128,10 @@ export class PythonEngineBridge {
       id: string;
       start_time: number;
       end_time: number;
+      title?: string;
+      score?: number;
+      hook_sentence?: string;
+      hook_rationale?: string;
       output_path: string;
       subtitles_path?: string | null;
       captions_count?: number;

@@ -81,7 +81,104 @@ def _pick_keyword(title_words: Sequence[str], preferred: Optional[str] = None) -
     return max(title_words, key=lambda w: len(re.sub(r"[^\w]+", "", w)))
 
 
-def _fallback_title_from_transcript(transcript: str, style: TitleStyle = DEFAULT_TITLE_STYLE) -> Tuple[str, str]:
+_DANGLING_END_WORDS = {
+    "each", "the", "of", "to", "and", "a", "an", "in", "for", "with", "that", "or", "but",
+    "by", "from", "at", "on", "into", "onto", "as", "if", "is", "are", "was", "were", "be",
+    "their", "your", "our", "my", "his", "her", "its", "this", "these", "those", "which",
+    "who", "what", "when", "where", "because", "until", "while", "about", "than", "very",
+    "just", "really", "actually", "literally", "basically", "so", "then",
+}
+
+_LEADING_FILLER_RE = re.compile(
+    r"^(?:(?:hey\s+guys|hey\s+everyone|welcome\s+back(?:\s+guys|\s+everyone|\s+everybody)?|what'?s\s+up\s+guys|okay\s+so|ok\s+so|alright\s+so|so\s+um|um|uh|so|well|like|okay|ok|alright|look|listen|actually|basically|guys)[,!\s]+)+",
+    flags=re.IGNORECASE,
+)
+
+
+def is_title_complete(title: str, max_words: int = 8) -> bool:
+    """Validates M6d: <= max_words, non-empty, and never ends in a dangling word."""
+    words = title.strip().split()
+    if not (1 <= len(words) <= max_words):
+        return False
+    last_clean = re.sub(r"[^\w']+", "", words[-1]).lower()
+    if not last_clean or last_clean in _DANGLING_END_WORDS:
+        return False
+    return True
+
+
+def _compress_clause(sentence: str, max_words: int = 8) -> str:
+    """
+    Compresses a hook sentence into a complete, punchy <= max_words clause that never
+    ends on a dangling word (each, the, of, to, and, a, an, in, for, with, that, or, but, ...).
+    """
+    txt = _strip_emojis_and_bad_chars(sentence or "")
+    txt = _LEADING_FILLER_RE.sub("", txt).strip()
+    if not txt:
+        return "WATCH THIS MOMENT"
+
+    # Prefer a complete sub-clause split on natural punctuation if sentence is long
+    clauses = [c.strip() for c in re.split(r"[;:\u2014\u2013]|,\s+(?=(?:and|but|so|because|which|while|then|when)\b)", txt) if c.strip()]
+    best_clause = txt
+    for cl in clauses:
+        ws = cl.split()
+        if 3 <= len(ws) <= max_words:
+            best_clause = cl
+            break
+
+    words = best_clause.split()
+    if len(words) > max_words:
+        # Remove weak internal filler words first to preserve subject + verb + object completeness
+        weak = {"really", "actually", "literally", "basically", "just", "very", "totally", "completely", "right", "now", "here"}
+        pruned = [w for w in words if re.sub(r"[^\w]+", "", w).lower() not in weak]
+        if len(pruned) >= 3:
+            words = pruned
+    if len(words) > max_words:
+        # Try keeping the punchy tail clause if prefix is generic ("Everything we need to...")
+        low0 = re.sub(r"[^\w]+", "", words[0]).lower()
+        if low0 in {"everything", "something", "here", "this", "that", "there"} and len(words) - max_words <= 3:
+            # Prefer a complete slice ending at a non-dangling word
+            cand_tail = words[-max_words:]
+            if re.sub(r"[^\w']+", "", cand_tail[-1]).lower() not in _DANGLING_END_WORDS:
+                words = cand_tail
+            else:
+                words = words[:max_words]
+        else:
+            words = words[:max_words]
+
+    # Strip trailing dangling words so it never ends mid-phrase
+    while len(words) > 2:
+        last_w = re.sub(r"[^\w']+", "", words[-1]).lower()
+        if not last_w or last_w in _DANGLING_END_WORDS:
+            words.pop()
+        else:
+            break
+
+    # Final safety if even 2nd word was dangling
+    while len(words) > 1 and re.sub(r"[^\w']+", "", words[-1]).lower() in _DANGLING_END_WORDS:
+        words.pop()
+
+    out = " ".join(words).upper().rstrip(".,;:-")
+    if not out or not is_title_complete(out, max_words=max_words):
+        # Extract top content words as a crisp headline
+        content = [
+            re.sub(r"[.,;:]+$", "", w).upper()
+            for w in txt.split()
+            if re.sub(r"[^\w]+", "", w).lower() not in _DANGLING_END_WORDS
+            and re.sub(r"[^\w]+", "", w).lower() not in _STOPWORDS
+        ][: min(5, max_words)]
+        out = " ".join(content) if content else "WATCH THIS MOMENT"
+    return out
+
+
+def _fallback_title_from_transcript(
+    transcript: str,
+    style: TitleStyle = DEFAULT_TITLE_STYLE,
+    hook_sentence: Optional[str] = None,
+) -> Tuple[str, str]:
+    if hook_sentence and hook_sentence.strip():
+        title = _compress_clause(hook_sentence, max_words=style.max_words)
+        return title, _pick_keyword(title.split())
+
     cleaned = _strip_emojis_and_bad_chars(transcript or "")
     if not cleaned:
         return "WATCH THIS MOMENT", "MOMENT"
@@ -93,7 +190,6 @@ def _fallback_title_from_transcript(transcript: str, style: TitleStyle = DEFAULT
         ws = s.split()
         if not ws:
             continue
-        # Prefer concise punchy sentences with questions/exclamations or strong nouns
         score = min(len(ws), 8) * 1.0
         if "?" in s or "!" in s:
             score += 3.0
@@ -103,13 +199,7 @@ def _fallback_title_from_transcript(transcript: str, style: TitleStyle = DEFAULT
             best_score = score
             best_sent = s
 
-    words = best_sent.split()[: style.fallback_max_words]
-    # Trim trailing dangling stopword if we cut mid-sentence
-    while len(words) > 3 and re.sub(r"[^\w]+", "", words[-1]).lower() in _STOPWORDS:
-        words.pop()
-    title = " ".join(words).upper().rstrip(".,;:")
-    if not title:
-        title = "WATCH THIS MOMENT"
+    title = _compress_clause(best_sent, max_words=style.max_words)
     kw = _pick_keyword(title.split())
     return title, kw
 
@@ -120,35 +210,35 @@ def resolve_title_and_keyword(
     keyword: Optional[str] = None,
     style: TitleStyle = DEFAULT_TITLE_STYLE,
     use_llm: bool = True,
+    hook_sentence: Optional[str] = None,
 ) -> Tuple[str, str]:
     """
-    Returns (UPPERCASE_TITLE, KEYWORD_TOKEN).
-    Uses explicit `title` if supplied, otherwise calls OpenClip's LLM provider layer with
-    validation and deterministic fallback.
+    Returns (UPPERCASE_COMPLETE_TITLE, KEYWORD_TOKEN).
+    Derives from hook_sentence when available; guarantees <= 8 words and no dangling ending.
     """
     if title and title.strip():
-        clean = _strip_emojis_and_bad_chars(title).upper()
-        words = clean.split()[: style.max_words]
-        clean = " ".join(words)
-        return clean, _pick_keyword(words, keyword)
+        clean = _compress_clause(title, max_words=style.max_words)
+        return clean, _pick_keyword(clean.split(), keyword)
 
-    if use_llm and transcript and transcript.strip():
+    source_text = (hook_sentence or transcript or "").strip()
+    if use_llm and source_text:
         prompt = (
-            "Write a punchy hook title for this clip from the transcript: "
+            "Write a punchy, COMPLETE hook title for this clip from the hook sentence and transcript: "
             f"max {style.max_words} words, max {style.max_lines} lines, ALL CAPS, "
+            "complete grammatical phrase (never a truncated fragment or dangling preposition/article), "
             "no emojis/hashtags/quotes, in the clip's language. "
             'Return JSON {"title": "...", "keyword": "<one word from the title>"}.\n\n'
-            f"Transcript:\n{transcript[:1200]}"
+            f"Hook sentence: {hook_sentence or ''}\n"
+            f"Transcript:\n{(transcript or source_text)[:1200]}"
         )
         resp = call_llm_json(prompt, system_prompt="Return ONLY valid raw JSON with keys title and keyword.")
         if isinstance(resp, dict) and isinstance(resp.get("title"), str):
-            cand = _strip_emojis_and_bad_chars(resp["title"]).upper()
-            words = cand.split()
-            if 1 <= len(words) <= style.max_words:
-                kw = _pick_keyword(words, str(resp.get("keyword") or ""))
-                return " ".join(words), kw
+            cand = _compress_clause(resp["title"], max_words=style.max_words)
+            if is_title_complete(cand, max_words=style.max_words):
+                kw = _pick_keyword(cand.split(), str(resp.get("keyword") or ""))
+                return cand, kw
 
-    return _fallback_title_from_transcript(transcript, style)
+    return _fallback_title_from_transcript(transcript, style, hook_sentence=hook_sentence)
 
 
 def _balanced_two_lines(
