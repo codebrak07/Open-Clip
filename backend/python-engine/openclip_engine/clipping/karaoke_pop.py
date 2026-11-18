@@ -62,7 +62,7 @@ class CaptionStyle:
     # Layer 2: Outer glow (middle, same hue as glyph)
     glow_sigma_1080: float = 6.0        # ~12px radius
     glow_opacity: float = 0.60
-    glow_dilate_px: int = 5.6             # odd kernel size for pre-blur stem spread
+    glow_dilate_px: int = 5.5             # odd integer kernel size for pre-blur stem spread
     glow_gain: float = 4.8              # compensates 2D blur attenuation on thin serif strokes so 4-12px halo sits at ~45-55%
 
     # Entrance smear (horizontal-only Gaussian blur + scaleX, time-based in ms)
@@ -652,8 +652,11 @@ def render_event_sprite(
     # Layer 2 (middle): Outer glow in the word's OWN color (~12px radius / sigma ~6, 60% opacity)
     # Dilate slightly and normalize thin-serif blur attenuation by glow_gain before applying 60% opacity
     glow_src = fill_layer
-    if style.glow_dilate_px >= 3:
-        glow_src = fill_layer.filter(ImageFilter.MaxFilter(size=style.glow_dilate_px))
+    dilate_k = int(round(style.glow_dilate_px))
+    if dilate_k >= 3:
+        if dilate_k % 2 == 0:
+            dilate_k += 1
+        glow_src = fill_layer.filter(ImageFilter.MaxFilter(size=dilate_k))
     glow_blurred = glow_src.filter(ImageFilter.GaussianBlur(radius=style.glow_sigma_1080 * scale))
     glow_arr = np.array(glow_blurred, dtype=np.uint8)
     boosted_a = np.minimum(255.0, glow_arr[:, :, 3].astype(np.float32) * style.glow_gain)

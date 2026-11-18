@@ -161,13 +161,17 @@ export const StudioHub: React.FC<StudioHubProps> = ({
       console.error('[StudioHub Import Error]', err);
       setIngestionState('error');
       setProgressPercent(0);
-      setStatusMessage(`✕ Import failed: ${err?.message || 'Unable to extract video stream'}`);
+      const rawMsg = String(err?.message || 'Unable to extract video stream');
+      const lines = rawMsg.split('\n').map((l) => l.trim()).filter(Boolean);
+      const concise = lines.length > 0 ? lines[lines.length - 1].slice(0, 180) : rawMsg.slice(0, 180);
+      setStatusMessage(`✕ Import failed: ${concise}`);
     }
   };
 
   const handlePaste = (e: React.ClipboardEvent<HTMLInputElement>) => {
-    const pastedText = e.clipboardData.getData('text');
+    const pastedText = e.clipboardData.getData('text').trim();
     if (pastedText && (pastedText.includes('youtube.com') || pastedText.includes('youtu.be'))) {
+      e.preventDefault();
       setYoutubeUrl(pastedText);
       handleImport(pastedText);
     }
