@@ -36,22 +36,24 @@ KARAOKE_POP_CONFIG: Dict[str, Any] = {
         "stroke": None,             # NO stroke / NO outline
     },
     "palette": {
-        "yellow": (255, 255, 0),    # #FFFF00
-        "green":  (0, 255, 0),      # #00FF00
-        "cyan":   (0, 255, 255),    # #00FFFF
-        "red":    (255, 0, 0),      # #FF0000
+        "lime":   (180, 255, 0),    # #B4FF00 Electric Lime
+        "cyan":   (0, 247, 255),    # #00F7FF Hyper Cyan
+        "yellow": (255, 242, 0),    # #FFF200 Laser Yellow
+        "green":  (0, 255, 102),    # #00FF66 Neon Green
+        "mint":   (51, 255, 204),   # #33FFCC Electric Mint
+        "pink":   (255, 46, 136),   # #FF2E88 Hot Neon Pink
+        "red":    (255, 42, 42),    # #FF2A2A Bright Neon Red
         "white":  (255, 255, 255),  # #FFFFFF
     },
     "color_rules": {
-        "short_word_cycle": ["yellow", "cyan", "red", "green"],
-        "chunk_highlight_colors": ["green", "yellow"],
-        "chunked_word_base": "white",
+        "short_word_cycle": ["cyan", "lime", "yellow", "green", "pink", "mint", "red"],
+        "whole_word_color": True,   # always color the entire word, never just one letter/syllable
         "no_immediate_repeat": True,
     },
     "glow": {
         "layers": [
-            {"sigma_px": 4.0,  "opacity": 0.50},   # tight halo hugging letters
-            {"sigma_px": 24.0, "opacity": 0.90},   # wide soft outer halo
+            {"sigma_px": 5.0,  "opacity": 0.65},   # bright tight halo hugging letters
+            {"sigma_px": 26.0, "opacity": 0.95},   # vibrant wide outer neon halo
         ],
     },
     "shadow": {
@@ -286,8 +288,9 @@ def build_karaoke_events_from_cues(
 
     palette = config["palette"]
     short_cycle = config["color_rules"]["short_word_cycle"]
-    chunk_colors = config["color_rules"]["chunk_highlight_colors"]
-    base_white = palette[config["color_rules"]["chunked_word_base"]]
+    whole_word_only = config["color_rules"].get("whole_word_color", True)
+    chunk_colors = config["color_rules"].get("chunk_highlight_colors", ["green", "yellow"])
+    base_white = palette[config["color_rules"].get("chunked_word_base", "white")]
 
     events: List[KaraokeEvent] = []
     last_color_name: Optional[str] = None
@@ -297,7 +300,12 @@ def build_karaoke_events_from_cues(
     for w_idx, (st, en, word) in enumerate(contiguous_words):
         is_last = w_idx == len(contiguous_words) - 1
         chunks = _split_into_syllable_chunks(word)
-        is_chunked = _is_chunked_emphasis_word(word, chunks, is_last) and len(chunks) >= 2 and (en - st) >= 0.16
+        is_chunked = (
+            (not whole_word_only)
+            and _is_chunked_emphasis_word(word, chunks, is_last)
+            and len(chunks) >= 2
+            and (en - st) >= 0.16
+        )
 
         if is_chunked:
             # Pick highlight color (green or yellow), preferring yellow for final '?' word & never repeating previous
