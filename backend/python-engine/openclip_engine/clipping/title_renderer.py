@@ -423,11 +423,11 @@ def _render_title_sharp_base(
 
     # Active ROI bounds for fast smear
     glow_pad = max(24, int(math.ceil(style.wide_glow_sigma_1080 * scale * 3.5)))
-    ry0 = max(0, min_y - glow_pad)
-    ry1 = min(strip_h, max_y + glow_pad)
-    rx0 = max(0, min_x - glow_pad)
-    rx1 = min(canvas_w, max_x + glow_pad)
-    center_x = canvas_w // 2
+    ry0 = int(max(0, min_y - glow_pad))
+    ry1 = int(min(strip_h, max_y + glow_pad))
+    rx0 = int(max(0, min_x - glow_pad))
+    rx1 = int(min(canvas_w, max_x + glow_pad))
+    center_x = int(canvas_w // 2)
 
     return comp, ry0, ry1, rx0, rx1, center_x
 

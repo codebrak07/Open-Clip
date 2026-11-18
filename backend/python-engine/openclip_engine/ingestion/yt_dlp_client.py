@@ -100,7 +100,7 @@ class YtDlpClient:
         # 1. Direct in-process yt_dlp for rich, accurate extraction
         try:
             import yt_dlp
-            ydl_opts = {
+            ydl_opts: Any = {
                 "quiet": True,
                 "no_warnings": True,
                 "skip_download": True,
@@ -176,7 +176,7 @@ class YtDlpClient:
         import yt_dlp
 
         video_id = URLValidator.extract_youtube_video_id(url)
-        ydl_opts = {
+        ydl_opts: Any = {
             "quiet": True,
             "no_warnings": True,
             "skip_download": True,
@@ -186,10 +186,11 @@ class YtDlpClient:
         }
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=False)
+            info_raw = ydl.extract_info(url, download=False)
 
-        if not info:
+        if not info_raw:
             raise RuntimeError("yt-dlp returned empty video info")
+        info: Dict[str, Any] = dict(info_raw)
 
         # Pull crisp 1080p Full HD source stream + original audio
         vid_url, aud_url, is_progressive = YtDlpClient._select_best_streams(info, max_height=max_height)
@@ -238,7 +239,7 @@ class YtDlpClient:
                 hook_mode=hook_mode,
                 hook_hint=hook_hint,
                 report_dir=OUTPUTS_DIR / f"{job_id}_analysis",
-                video_label=metadata["title"],
+                video_label=str(metadata.get("title") or f"YouTube Video ({video_id})"),
                 use_llm=True,
                 ffmpeg_bin=ffmpeg_bin,
             )

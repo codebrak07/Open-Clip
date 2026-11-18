@@ -25,7 +25,7 @@ import subprocess
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple, cast
 
 import numpy as np
 from PIL import Image, ImageDraw
@@ -33,20 +33,23 @@ from PIL import Image, ImageDraw
 from openclip_engine.clipping.config_styles import DEFAULT_LAYOUT, REPO_ROOT, LayoutStyle
 from openclip_engine.clipping.karaoke_pop import resolve_writable_cache_dir
 
+Vision: Any = None
+Quartz: Any = None
 try:
-    import Vision  # type: ignore
-    import Quartz  # type: ignore
+    import Vision as _Vision  # type: ignore
+    import Quartz as _Quartz  # type: ignore
+    Vision = _Vision
+    Quartz = _Quartz
     _HAS_VISION = True
 except Exception:
-    Vision = None
-    Quartz = None
     _HAS_VISION = False
 
+cv2: Any = None
 try:
-    import cv2  # type: ignore
+    import cv2 as _cv2  # type: ignore
+    cv2 = _cv2
     _HAS_CV2 = True
 except Exception:
-    cv2 = None
     _HAS_CV2 = False
 
 
@@ -122,23 +125,25 @@ def _iou(a: Box, b: Box) -> float:
 
 def _detect_boxes_vision_rgb(rgb: np.ndarray) -> Optional[List[Box]]:
     """Runs Apple Vision human + face rectangle detection on an RGB uint8 numpy image."""
-    if not _HAS_VISION:
+    if not _HAS_VISION or Vision is None or Quartz is None:
         return None
+    vision_mod: Any = cast(Any, Vision)
+    quartz_mod: Any = cast(Any, Quartz)
     h, w, _ = rgb.shape
     try:
         rgba = np.empty((h, w, 4), dtype=np.uint8)
         rgba[:, :, :3] = rgb
         rgba[:, :, 3] = 255
         raw = rgba.tobytes()
-        cs = Quartz.CGColorSpaceCreateDeviceRGB()
-        prov = Quartz.CGDataProviderCreateWithData(None, raw, len(raw), None)
-        cg = Quartz.CGImageCreate(
-            w, h, 8, 32, w * 4, cs, Quartz.kCGImageAlphaNoneSkipLast,
-            prov, None, False, Quartz.kCGRenderingIntentDefault,
+        cs = quartz_mod.CGColorSpaceCreateDeviceRGB()
+        prov = quartz_mod.CGDataProviderCreateWithData(None, raw, len(raw), None)
+        cg = quartz_mod.CGImageCreate(
+            w, h, 8, 32, w * 4, cs, quartz_mod.kCGImageAlphaNoneSkipLast,
+            prov, None, False, quartz_mod.kCGRenderingIntentDefault,
         )
-        req_h = Vision.VNDetectHumanRectanglesRequest.alloc().init()
-        req_f = Vision.VNDetectFaceRectanglesRequest.alloc().init()
-        handler = Vision.VNImageRequestHandler.alloc().initWithCGImage_options_(cg, None)
+        req_h = vision_mod.VNDetectHumanRectanglesRequest.alloc().init()
+        req_f = vision_mod.VNDetectFaceRectanglesRequest.alloc().init()
+        handler = vision_mod.VNImageRequestHandler.alloc().initWithCGImage_options_(cg, None)
         ok, _ = handler.performRequests_error_([req_h, req_f], None)
         if not ok:
             return None

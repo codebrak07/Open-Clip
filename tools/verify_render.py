@@ -633,6 +633,7 @@ def _verify_e_sfx(src_mp4: Path, tmp_dir: Path) -> Tuple[bool, str]:
         errs.append("no riser generated before gapped shout word")
     max_riser_err_ms = 0.0
     for r in risers:
+        assert r.paired_boom_t is not None
         err_ms = abs((r.play_start_s + r.play_duration_s) - r.paired_boom_t) * 1000.0
         max_riser_err_ms = max(max_riser_err_ms, err_ms)
         if err_ms > 10.0:

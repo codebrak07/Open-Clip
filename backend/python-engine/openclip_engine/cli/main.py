@@ -275,7 +275,7 @@ def render_clip_cmd(
         mode=sfx_mode,
         seed=sfx_seed,
         master_db=sfx_master_db,
-        **({"sfx_dir": sfx_dir} if sfx_dir else {}),
+        sfx_dir=sfx_dir if sfx_dir else DEFAULT_SFX_CONFIG.sfx_dir,
     )
     _, meta = render_polished_clip(
         video_in=video_in,

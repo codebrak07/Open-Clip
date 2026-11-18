@@ -18,11 +18,12 @@ from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
 from openclip_engine.clipping.config_styles import CaptionStyle, KARAOKE_POP
 
+cv2: Any = None
 try:
-    import cv2  # type: ignore
+    import cv2 as _cv2  # type: ignore
+    cv2 = _cv2
     _HAS_CV2 = True
 except Exception:
-    cv2 = None
     _HAS_CV2 = False
 
 
@@ -413,7 +414,7 @@ _SPRITE_MEM_CACHE: Dict[str, Path] = {}
 _SPRITE_LOCK = threading.Lock()
 
 
-def _load_font(size: int, font_paths: Sequence[str]) -> ImageFont.FreeTypeFont:
+def _load_font(size: int, font_paths: Sequence[str]) -> Union[ImageFont.FreeTypeFont, ImageFont.ImageFont]:
     cache = getattr(_FONT_TLS, "fonts", None)
     if cache is None:
         cache = {}
@@ -815,12 +816,12 @@ def _render_sharp_base(
     max_w = int(round(style.max_word_width_pct * width))
 
     word_bbox = meas.textbbox((0, 0), ev.word, font=font)
-    word_w = word_bbox[2] - word_bbox[0]
+    word_w = int(round(word_bbox[2] - word_bbox[0]))
     if word_w > max_w and word_w > 0:
         shrunk_size = max(16, int(math.floor(base_font_size * (max_w / word_w))))
         font = _load_font(shrunk_size, style.font_paths)
         word_bbox = meas.textbbox((0, 0), ev.word, font=font)
-        word_w = word_bbox[2] - word_bbox[0]
+        word_w = int(round(word_bbox[2] - word_bbox[0]))
 
     ref_bbox = meas.textbbox((0, 0), "Every", font=font)
     ref_center_from_origin = (ref_bbox[1] + ref_bbox[3]) / 2.0
@@ -831,7 +832,7 @@ def _render_sharp_base(
     margin = max(12, int(round(0.05 * width)))
     start_x = anchor_x - word_w // 2
     start_x = max(margin, min(width - margin - word_w, start_x))
-    word_center_x = start_x + word_w // 2
+    word_center_x = int(start_x + word_w // 2)
 
     sh_dx = int(round(style.shadow_offset_x_1080 * scale))
     sh_dy = int(round(style.shadow_offset_y_1080 * scale))
@@ -839,10 +840,10 @@ def _render_sharp_base(
     halo_sigma = style.halo_glow_sigma_1080 * scale * style.glow_spread_scale
     pad_xy = max(64, int(math.ceil(halo_sigma * 3.2)) + dil_px + max(abs(sh_dx), abs(sh_dy)) + 10)
 
-    gx0 = start_x + word_bbox[0]
-    gy0 = draw_y + word_bbox[1]
-    gx1 = start_x + word_bbox[2]
-    gy1 = draw_y + word_bbox[3]
+    gx0 = int(round(start_x + word_bbox[0]))
+    gy0 = int(round(draw_y + word_bbox[1]))
+    gx1 = int(round(start_x + word_bbox[2]))
+    gy1 = int(round(draw_y + word_bbox[3]))
 
     rx0 = max(0, gx0 - pad_xy)
     ry0 = max(0, gy0 - pad_xy)
@@ -851,8 +852,8 @@ def _render_sharp_base(
     roi_w = max(1, rx1 - rx0)
     roi_h = max(1, ry1 - ry0)
 
-    local_x = start_x - rx0
-    local_y = draw_y - ry0
+    local_x = int(start_x - rx0)
+    local_y = int(draw_y - ry0)
 
     main_rgb = style.palette[ev.main_color_name]
     white_rgb = style.palette[style.emphasis_base_color]

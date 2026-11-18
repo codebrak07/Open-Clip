@@ -30,7 +30,7 @@ KINETIC_PALETTE: List[Tuple[int, int, int, int]] = [
 ]
 
 
-def _load_bold_font(size: int) -> ImageFont.FreeTypeFont:
+def _load_bold_font(size: int) -> Any:
     candidates = [
         "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
         "/System/Library/Fonts/Supplemental/Impact.ttf",
