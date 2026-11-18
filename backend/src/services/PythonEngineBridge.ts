@@ -115,9 +115,25 @@ export class PythonEngineBridge {
     return '';
   }
 
-  public static async extractYouTubeClips(url: string, jobId: string, clipCount: number = 5): Promise<{
+  public static async extractYouTubeClips(
+    url: string,
+    jobId: string,
+    clipCount: number = 5,
+    aspectRatio: string = '9:16',
+    captionStyle: string = 'Hormozi'
+  ): Promise<{
     metadata: any;
-    clips: Array<{ index: number; id: string; start_time: number; end_time: number; output_path: string; size_bytes: number }>;
+    clips: Array<{
+      index: number;
+      id: string;
+      start_time: number;
+      end_time: number;
+      output_path: string;
+      subtitles_path?: string | null;
+      captions_count?: number;
+      transcript_preview?: string;
+      size_bytes: number;
+    }>;
   }> {
     const res = await this.runCommand([
       'extract-clips',
@@ -126,6 +142,10 @@ export class PythonEngineBridge {
       jobId,
       '--clip-count',
       String(clipCount),
+      '--aspect-ratio',
+      aspectRatio,
+      '--caption-style',
+      captionStyle,
     ]);
     if (res && Array.isArray(res.clips) && res.clips.length > 0) {
       return res;

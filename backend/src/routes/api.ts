@@ -126,8 +126,14 @@ router.post('/jobs/youtube/import', async (req, res) => {
     const jobId = 'job_' + Date.now();
     const now = Date.now();
 
-    // 1. Extract real HD H.264/AAC MP4 clips in parallel directly from YouTube CDN via Python engine
-    const extracted = await PythonEngineBridge.extractYouTubeClips(url, jobId, clipCount);
+    // 1. Extract real 1080p HD clips in parallel with smart reframe & burnt-in captions
+    const extracted = await PythonEngineBridge.extractYouTubeClips(
+      url,
+      jobId,
+      clipCount,
+      aspectRatio,
+      captionStyle
+    );
     const meta = extracted.metadata || {};
     const primaryVideoPath = extracted.clips[0]?.output_path || null;
 
@@ -172,14 +178,17 @@ router.post('/jobs/youtube/import', async (req, res) => {
     ];
 
     const insertClip = db.prepare(`
-      INSERT INTO clips (id, job_id, start_time, end_time, score, title, hook_rationale, render_status, output_path)
-      VALUES (?, ?, ?, ?, ?, ?, ?, 'completed', ?)
+      INSERT INTO clips (id, job_id, start_time, end_time, score, title, hook_rationale, render_status, output_path, subtitles_path)
+      VALUES (?, ?, ?, ?, ?, ?, ?, 'completed', ?, ?)
     `);
 
     for (let i = 0; i < extracted.clips.length; i++) {
       const seg = extracted.clips[i];
       const template = candidateTemplates[i % candidateTemplates.length];
       const score = Math.max(78, 97 - i * 2);
+      const rationale = seg.transcript_preview
+        ? `"${seg.transcript_preview}" — ${template.rationale}`
+        : template.rationale;
 
       insertClip.run(
         seg.id,
@@ -188,8 +197,9 @@ router.post('/jobs/youtube/import', async (req, res) => {
         seg.end_time,
         score,
         template.title,
-        template.rationale,
-        seg.output_path
+        rationale,
+        seg.output_path,
+        seg.subtitles_path || null
       );
     }
 

@@ -6,6 +6,12 @@ from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple
 from openclip_engine.core.config import UPLOADS_DIR, OUTPUTS_DIR, FFMPEG_PATH
 from openclip_engine.ingestion.url_validator import URLValidator
+from openclip_engine.clipping.caption_burner import (
+    fetch_youtube_captions,
+    slice_and_chunk_cues,
+    write_vtt,
+    build_reframe_and_caption_clip,
+)
 
 
 class YtDlpClient:
@@ -153,12 +159,14 @@ class YtDlpClient:
         url: str,
         job_id: str,
         clip_count: int = 5,
-        max_height: int = 720,
+        max_height: int = 1080,
+        aspect_ratio: str = "9:16",
+        caption_style: str = "Hormozi",
     ) -> Dict[str, Any]:
         """
-        Extracts real HD H.264/AAC MP4 viral clip segments directly from YouTube CDN in parallel
-        using yt-dlp stream resolution + FFmpeg HTTP-Range stream copy (-c copy).
-        Zero re-encoding, zero fake test bars, ~10-15s total for 5-10 real HD clips.
+        Extracts real 1080p Full HD H.264/AAC MP4 viral clip segments directly from YouTube CDN in parallel,
+        fetches real timed captions from YouTube, smart-reframes to target aspect ratio (e.g. 1080x1920 9:16),
+        and burns crisp Hormozi / Minimalist / Banner captions directly into each MP4.
         """
         if not URLValidator.is_valid_youtube_url(url):
             raise ValueError(f"Invalid or unsupported YouTube URL: {url}")
@@ -181,9 +189,13 @@ class YtDlpClient:
         if not info:
             raise RuntimeError("yt-dlp returned empty video info")
 
+        # Pull crisp 1080p Full HD source stream + original audio
         vid_url, aud_url, is_progressive = YtDlpClient._select_best_streams(info, max_height=max_height)
         if not vid_url:
             raise RuntimeError("No playable MP4 video stream found for this YouTube URL")
+
+        # Fetch real timed speech captions from YouTube once (~0.2s)
+        all_cues = fetch_youtube_captions(info)
 
         total_duration = int(info.get("duration") or 180)
         clip_count = max(1, min(20, int(clip_count)))
@@ -192,12 +204,15 @@ class YtDlpClient:
             "title": info.get("title", f"YouTube Video ({video_id})"),
             "uploader": info.get("uploader") or info.get("channel") or "YouTube Creator",
             "duration": total_duration,
-            "width": info.get("width", 1280),
-            "height": info.get("height", 720),
+            "width": info.get("width", 1920),
+            "height": info.get("height", 1080),
             "fps": info.get("fps", 30),
             "thumbnail": info.get("thumbnail") or f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg",
             "view_count": info.get("view_count", 0),
             "video_id": video_id,
+            "captions_available": len(all_cues) > 0,
+            "aspect_ratio": aspect_ratio,
+            "caption_style": caption_style,
             "status": "loaded",
         }
 
@@ -213,49 +228,76 @@ class YtDlpClient:
         OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
         ffmpeg_bin = FFMPEG_PATH or "ffmpeg"
 
-        def cut_single_clip(idx: int, start_sec: int) -> Dict[str, Any]:
+        def cut_and_caption_clip(idx: int, start_sec: int) -> Dict[str, Any]:
             end_sec = min(total_duration, start_sec + clip_len)
             seg_dur = max(5, end_sec - start_sec)
             clip_id = f"{job_id}_clip_{idx + 1}"
+            raw_path = OUTPUTS_DIR / f".raw_{clip_id}.mp4"
             out_path = OUTPUTS_DIR / f"{clip_id}.mp4"
+            vtt_path = OUTPUTS_DIR / f"{clip_id}.vtt"
 
-            if is_progressive or not aud_url:
-                cmd = [
-                    ffmpeg_bin, "-y",
-                    "-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "2",
-                    "-ss", str(start_sec), "-t", str(seg_dur), "-i", vid_url,
-                    "-c", "copy", "-movflags", "+faststart",
-                    str(out_path),
-                ]
-            else:
-                cmd = [
-                    ffmpeg_bin, "-y",
-                    "-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "2",
-                    "-ss", str(start_sec), "-t", str(seg_dur), "-i", vid_url,
-                    "-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "2",
-                    "-ss", str(start_sec), "-t", str(seg_dur), "-i", aud_url,
-                    "-map", "0:v:0", "-map", "1:a:0",
-                    "-c", "copy", "-shortest", "-movflags", "+faststart",
-                    str(out_path),
-                ]
+            try:
+                # 1. Fast stream-copy 1080p segment from YouTube CDN
+                if is_progressive or not aud_url:
+                    cmd = [
+                        ffmpeg_bin, "-y", "-loglevel", "error",
+                        "-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "2",
+                        "-ss", str(start_sec), "-t", str(seg_dur), "-i", vid_url,
+                        "-c", "copy", "-movflags", "+faststart",
+                        str(raw_path),
+                    ]
+                else:
+                    cmd = [
+                        ffmpeg_bin, "-y", "-loglevel", "error",
+                        "-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "2",
+                        "-ss", str(start_sec), "-t", str(seg_dur), "-i", vid_url,
+                        "-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "2",
+                        "-ss", str(start_sec), "-t", str(seg_dur), "-i", aud_url,
+                        "-map", "0:v:0", "-map", "1:a:0",
+                        "-c", "copy", "-shortest", "-movflags", "+faststart",
+                        str(raw_path),
+                    ]
 
-            res = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
-            if res.returncode != 0 or not out_path.exists() or out_path.stat().st_size < 1000:
-                raise RuntimeError(f"FFmpeg clip {idx + 1} extraction failed: {res.stderr[-300:]}")
+                res = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+                if res.returncode != 0 or not raw_path.exists() or raw_path.stat().st_size < 1000:
+                    raise RuntimeError(f"FFmpeg clip {idx + 1} fetch failed: {res.stderr[-300:]}")
 
-            return {
-                "index": idx,
-                "id": clip_id,
-                "start_time": start_sec,
-                "end_time": end_sec,
-                "output_path": str(out_path),
-                "size_bytes": out_path.stat().st_size,
-            }
+                # 2. Slice real spoken captions for this segment and write WebVTT
+                clip_cues = slice_and_chunk_cues(all_cues, float(start_sec), float(end_sec))
+                sub_path_str: Optional[str] = None
+                if clip_cues:
+                    write_vtt(clip_cues, vtt_path)
+                    sub_path_str = str(vtt_path)
+
+                # 3. Smart-reframe to full 1080p target aspect ratio + burn crisp styled captions
+                build_reframe_and_caption_clip(
+                    raw_clip_path=raw_path,
+                    final_clip_path=out_path,
+                    cues=clip_cues,
+                    aspect_ratio=aspect_ratio,
+                    caption_style=caption_style,
+                    ffmpeg_bin=ffmpeg_bin,
+                )
+
+                transcript_text = " ".join(c["text"] for c in clip_cues)[:160]
+                return {
+                    "index": idx,
+                    "id": clip_id,
+                    "start_time": start_sec,
+                    "end_time": end_sec,
+                    "output_path": str(out_path),
+                    "subtitles_path": sub_path_str,
+                    "captions_count": len(clip_cues),
+                    "transcript_preview": transcript_text,
+                    "size_bytes": out_path.stat().st_size,
+                }
+            finally:
+                raw_path.unlink(missing_ok=True)
 
         extracted: List[Dict[str, Any]] = []
-        max_workers = min(6, clip_count)
+        max_workers = min(4, clip_count)
         with ThreadPoolExecutor(max_workers=max_workers) as pool:
-            futures = {pool.submit(cut_single_clip, idx, st): idx for idx, st in enumerate(starts)}
+            futures = {pool.submit(cut_and_caption_clip, idx, st): idx for idx, st in enumerate(starts)}
             for fut in as_completed(futures):
                 extracted.append(fut.result())
 

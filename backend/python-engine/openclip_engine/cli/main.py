@@ -92,9 +92,22 @@ def download(url: str, job_id: str = "cli_job"):
     console.print(f"[bold green]Download completed:[/] {out}")
 
 @app.command(name="extract-clips")
-def extract_clips(url: str, job_id: str = "cli_job", clip_count: int = 5):
-    """Extracts multiple real HD MP4 clips in parallel directly from a YouTube URL."""
-    result = YtDlpClient.extract_clips_parallel(url, job_id=job_id, clip_count=clip_count)
+def extract_clips(
+    url: str,
+    job_id: str = "cli_job",
+    clip_count: int = 5,
+    aspect_ratio: str = "9:16",
+    caption_style: str = "Hormozi",
+):
+    """Extracts multiple real 1080p HD MP4 clips in parallel with smart reframe and burnt-in captions."""
+    result = YtDlpClient.extract_clips_parallel(
+        url,
+        job_id=job_id,
+        clip_count=clip_count,
+        max_height=1080,
+        aspect_ratio=aspect_ratio,
+        caption_style=caption_style,
+    )
     print(json.dumps(result))
 
 @app.command()

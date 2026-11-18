@@ -137,9 +137,12 @@ export const StudioHub: React.FC<StudioHubProps> = ({
         setExtractedClips(clips);
         setProgressPercent(100);
         setIngestionState('done');
-        setStatusMessage(`✓ Work is done! ${clips.length} real HD clips extracted`);
+        setStatusMessage(`✓ Work is done! ${clips.length} 1080p HD clips with ${captionStyle} captions`);
 
-        // Immediately update playback store with the real extracted HD clip stream
+        // Immediately update playback store with the real extracted 1080p HD clip stream & aspect ratio
+        if (selectedRatio === '9:16' || selectedRatio === '16:9') {
+          usePlaybackStore.getState().setAspectRatio(selectedRatio);
+        }
         const primaryUrl = clips[0]?.video_url || importData.video_url || `/api/jobs/${jobId}/video`;
         const fullStreamUrl = primaryUrl.startsWith('http') ? primaryUrl : `${API_BASE_URL}${primaryUrl}`;
         usePlaybackStore.getState().setSourceVideoUrl(fullStreamUrl);
@@ -798,24 +801,30 @@ export const StudioHub: React.FC<StudioHubProps> = ({
             >
               BURNT-IN CAPTION STYLE
             </label>
-            <div style={{ display: 'flex', gap: '8px' }}>
-              {['Hormozi', 'Minimalist', 'Banner'].map((s) => (
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px' }}>
+              {[
+                { id: 'Hormozi', label: '🟡 Hormozi Amber', desc: 'Bold white + amber pop' },
+                { id: 'Kinetic', label: '🌈 Kinetic Lime/Cyan', desc: '1-word 1-color · vertical blur' },
+                { id: 'Minimalist', label: '⚪ Minimalist', desc: 'Clean editorial fade' },
+                { id: 'Banner', label: '⬛ Subtitle Bar', desc: 'Dark pill container' },
+              ].map((s) => (
                 <button
-                  key={s}
-                  onClick={() => setCaptionStyle(s)}
+                  key={s.id}
+                  onClick={() => setCaptionStyle(s.id)}
                   style={{
-                    flex: 1,
                     padding: '10px 12px',
                     borderRadius: '8px',
                     fontSize: '12px',
                     fontWeight: 600,
                     cursor: 'pointer',
-                    backgroundColor: captionStyle === s ? 'rgba(201, 158, 53, 0.1)' : '#F9F9F8',
-                    color: captionStyle === s ? '#C99E35' : '#62615D',
-                    border: captionStyle === s ? '1.5px solid #C99E35' : '1px solid #DFDDD5',
+                    textAlign: 'left',
+                    backgroundColor: captionStyle === s.id ? 'rgba(201, 158, 53, 0.1)' : '#F9F9F8',
+                    color: captionStyle === s.id ? '#171717' : '#62615D',
+                    border: captionStyle === s.id ? '1.5px solid #C99E35' : '1px solid #DFDDD5',
                   }}
                 >
-                  {s === 'Hormozi' ? '🟡 Hormozi Amber' : s === 'Minimalist' ? '⚪ Minimalist' : '⬛ Subtitle Bar'}
+                  <div style={{ fontWeight: 700, color: captionStyle === s.id ? '#A67C1E' : '#171717' }}>{s.label}</div>
+                  <div style={{ fontSize: '10px', color: '#898781', fontWeight: 400, marginTop: '2px' }}>{s.desc}</div>
                 </button>
               ))}
             </div>
