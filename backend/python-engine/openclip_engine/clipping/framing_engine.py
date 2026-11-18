@@ -99,6 +99,8 @@ class ShotFramingPlan:
     split_crops: List[Tuple[int, int, int, int]] = field(default_factory=list)
     residuals: Dict[str, Any] = field(default_factory=dict)
     subjects: List[Dict[str, Any]] = field(default_factory=list)
+    start_frame: Optional[int] = None
+    end_frame: Optional[int] = None
 
 
 @dataclass
@@ -420,9 +422,23 @@ def _aggregate_shot_subjects(
     t0: float,
     t1: float,
     ema_alpha: float = 0.15,
+    logo_left_pct: float = 0.0,
+    logo_top_pct: float = 0.14,
 ) -> List[Box]:
     """Aggregates EMA-smoothed subject boxes within shot [t0, t1], grouped left-to-right."""
-    shot_frames = [fr for fr in tracks if t0 - 0.05 <= float(fr["t"]) <= t1 + 0.05 and fr.get("boxes")]
+    def _keep_box(b: Dict[str, Any]) -> bool:
+        if logo_left_pct <= 0.0:
+            return True
+        cx = float(b["x"]) + float(b["w"]) * 0.5
+        cy = float(b["y"]) + float(b["h"]) * 0.5
+        return not (cx < logo_left_pct and cy < logo_top_pct)
+
+    shot_frames = []
+    for fr in tracks:
+        if t0 - 0.05 <= float(fr["t"]) <= t1 + 0.05 and fr.get("boxes"):
+            kept = [b for b in fr["boxes"] if _keep_box(b)]
+            if kept:
+                shot_frames.append({"t": fr["t"], "boxes": kept})
     if not shot_frames:
         return []
 
@@ -565,6 +581,30 @@ def _solve_reference_crop(
     )
 
 
+def _apply_logo_safe_left(
+    crop_x: int,
+    crop_y: int,
+    crop_w: int,
+    src_w: int,
+    src_h: int,
+    layout: LayoutStyle,
+) -> Tuple[int, int]:
+    """Excludes a top-left corner logo/badge when edge_logo_margin_left_pct > 0 and crop reaches top band."""
+    if layout.edge_logo_margin_left_pct <= 0.0:
+        return crop_x, crop_w
+    logo_top_px = int(round(src_h * layout.edge_logo_margin_top_pct))
+    if crop_y >= logo_top_px:
+        return crop_x, crop_w
+    min_x = int(math.ceil(src_w * layout.edge_logo_margin_left_pct))
+    min_x += min_x % 2
+    if crop_x >= min_x:
+        return crop_x, crop_w
+    avail_w = max(64, _make_even(src_w - min_x, lo=64, hi=src_w))
+    new_w = min(crop_w, avail_w)
+    new_x = min(min_x, max(0, src_w - new_w))
+    return new_x, new_w
+
+
 def _solve_shot_auto(
     subjects: Sequence[Box],
     src_w: int,
@@ -575,6 +615,11 @@ def _solve_shot_auto(
 ) -> ShotFramingPlan:
     """Automatic per-shot uniform-scale framing solver (0, 1, or 2+ subjects)."""
     win_aspect = win_w / float(win_h)
+    min_crop_w_upscale = 64
+    if layout.max_upscale > 0.0:
+        # Allow cover height scale when source is shorter than win_h, otherwise cap zoom <= max_upscale
+        eff_max_up = max(layout.max_upscale, win_h / float(max(1, src_h)))
+        min_crop_w_upscale = _make_even(int(math.ceil(win_w / eff_max_up)), lo=64, hi=src_w)
 
     # Default center cover crop
     def _center_cover() -> ShotFramingPlan:
@@ -586,6 +631,7 @@ def _solve_shot_auto(
             ch = _make_even(int(round(src_w / win_aspect)), lo=64, hi=src_h)
         cx = (src_w - cw) // 2
         cy = (src_h - ch) // 2
+        cx, cw = _apply_logo_safe_left(cx, cy, cw, src_w, src_h, layout)
         return ShotFramingPlan(
             shot_index=0, start_s=0.0, end_s=0.0, mode="center", subject_count=0,
             crop_x=cx, crop_y=cy, crop_w=cw, crop_h=ch, out_w=win_w, out_h=win_h, offset_y_in_window=0,
@@ -601,13 +647,14 @@ def _solve_shot_auto(
         sb = subs[0]
         if (src_w / float(src_h)) >= win_aspect:
             ch = src_h
-            cw = _make_even(int(round(src_h * win_aspect)), lo=64, hi=src_w)
+            cw = _make_even(int(round(src_h * win_aspect)), lo=min_crop_w_upscale, hi=src_w)
         else:
             cw = src_w
             ch = _make_even(int(round(src_w / win_aspect)), lo=64, hi=src_h)
         cx = int(round(max(0.0, min(src_w - cw, sb.cx * src_w - cw * 0.5))))
         eye_y = (sb.y + (0.45 if sb.kind == "face" else 0.22) * sb.h) * src_h
         cy = int(round(max(0.0, min(src_h - ch, eye_y - 0.38 * ch))))
+        cx, cw = _apply_logo_safe_left(cx, cy, cw, src_w, src_h, layout)
         return ShotFramingPlan(
             shot_index=0, start_s=0.0, end_s=0.0, mode="single_subject", subject_count=1,
             crop_x=cx, crop_y=cy, crop_w=cw, crop_h=ch, out_w=win_w, out_h=win_h, offset_y_in_window=0,
@@ -629,6 +676,7 @@ def _solve_shot_auto(
                 ch = _make_even(int(round(src_w / panel_aspect)), lo=64, hi=src_h)
             px = int(round(max(0.0, min(src_w - cw, sb.cx * src_w - cw * 0.5))))
             py = int(round(max(0.0, min(src_h - ch, sb.cy * src_h - ch * 0.42))))
+            px, cw = _apply_logo_safe_left(px, py, cw, src_w, src_h, layout)
             split_crops.append((px, py, cw, ch))
         return ShotFramingPlan(
             shot_index=0, start_s=0.0, end_s=0.0, mode="split", subject_count=n_panels,
@@ -652,8 +700,9 @@ def _solve_shot_auto(
     cx1_norm = min(1.0, ux1 + pad_norm)
 
     crop_x = int(round(cx0_norm * src_w))
-    crop_w = _make_even(int(round((cx1_norm - cx0_norm) * src_w)), lo=64, hi=src_w)
+    crop_w = _make_even(int(round((cx1_norm - cx0_norm) * src_w)), lo=min_crop_w_upscale, hi=src_w)
     crop_x = max(0, min(src_w - crop_w, crop_x))
+    crop_x, crop_w = _apply_logo_safe_left(crop_x, 0, crop_w, src_w, src_h, layout)
 
     # Uniform scale s = win_w / crop_w (NEVER stretch!)
     s = win_w / float(crop_w)
@@ -674,9 +723,12 @@ def _solve_shot_auto(
 
     # Wide source -> uniform-scaled horizontal strip vertically centered in window with 24px feather!
     out_h = min(win_h, scaled_full_h)
-    target_cy_frac = 0.45 if layout.framing_preset == "two_shot_gap" else 0.50
-    subj_cy_in_strip = ((uy0 + uy1) * 0.5) * out_h
-    offset_y = int(round(max(0.0, min(win_h - out_h, target_cy_frac * win_h - subj_cy_in_strip))))
+    if layout.center_wide_strips:
+        offset_y = max(0, (win_h - out_h) // 2)
+    else:
+        target_cy_frac = 0.45 if layout.framing_preset == "two_shot_gap" else 0.50
+        subj_cy_in_strip = ((uy0 + uy1) * 0.5) * out_h
+        offset_y = int(round(max(0.0, min(win_h - out_h, target_cy_frac * win_h - subj_cy_in_strip))))
     return ShotFramingPlan(
         shot_index=0, start_s=0.0, end_s=0.0, mode="two_shot_strip", subject_count=len(subs),
         crop_x=crop_x, crop_y=0, crop_w=crop_w, crop_h=src_h,
@@ -696,6 +748,7 @@ def plan_framing_for_clip(
     layout: LayoutStyle = DEFAULT_LAYOUT,
     ffmpeg_bin: str = "ffmpeg",
     ref_boxes_override: Optional[Sequence[Dict[str, Any]]] = None,
+    fps: Optional[float] = None,
 ) -> Tuple[List[ShotFramingPlan], Dict[str, Any]]:
     """
     Builds a per-shot framing plan for the clip.
@@ -706,7 +759,10 @@ def plan_framing_for_clip(
     if mode == "off":
         plan = _solve_shot_auto([], src_w, src_h, win_w, win_h, layout)
         plan.start_s = 0.0
-        plan.end_s = round(duration, 4)
+        plan.end_s = round(duration, 6)
+        if fps is not None and fps > 0:
+            plan.start_frame = 0
+            plan.end_frame = int(round(duration * fps))
         return [plan], {"framing_mode": "off", "detector": "disabled", "detect_s": 0.0, "shots": [asdict(plan)]}
 
     tracks, backend, detect_s = detect_subjects(
@@ -732,13 +788,22 @@ def plan_framing_for_clip(
     boundaries = [0.0]
     for ct in sorted(scene_cuts):
         if ct - boundaries[-1] >= layout.framing_min_shot_s and (duration - ct) >= layout.framing_min_shot_s:
-            boundaries.append(round(float(ct), 4))
-    boundaries.append(round(duration, 4))
+            boundaries.append(round(float(ct), 6))
+    boundaries.append(round(duration, 6))
+
+    frame_bounds: Optional[List[int]] = None
+    if fps is not None and fps > 0:
+        frame_bounds = [int(round(b * fps)) for b in boundaries]
 
     plans: List[ShotFramingPlan] = []
     for idx in range(len(boundaries) - 1):
         s0, s1 = boundaries[idx], boundaries[idx + 1]
-        subs = _aggregate_shot_subjects(tracks, s0, s1, ema_alpha=layout.framing_ema_alpha)
+        subs = _aggregate_shot_subjects(
+            tracks, s0, s1,
+            ema_alpha=layout.framing_ema_alpha,
+            logo_left_pct=layout.edge_logo_margin_left_pct,
+            logo_top_pct=layout.edge_logo_margin_top_pct,
+        )
 
         shot_plan: Optional[ShotFramingPlan] = None
         if ref_layout is not None and subs:
@@ -749,7 +814,37 @@ def plan_framing_for_clip(
         shot_plan.shot_index = idx
         shot_plan.start_s = s0
         shot_plan.end_s = s1
+        if frame_bounds is not None:
+            shot_plan.start_frame = frame_bounds[idx]
+            shot_plan.end_frame = frame_bounds[idx + 1]
         plans.append(shot_plan)
+
+    # Harmonize wide-strip heights when consistent_wide_layout is enabled (prevents layout jumping across shots!)
+    if layout.consistent_wide_layout and len(plans) >= 2:
+        wide_shots = [p for p in plans if p.mode == "two_shot_strip" and p.out_h < win_h]
+        if len(wide_shots) >= max(2, (len(plans) + 1) // 2):
+            # Pick a single unified centered wide height (matching the widest needed shot, clamped safely)
+            min_x_logo = int(math.ceil(src_w * layout.edge_logo_margin_left_pct)) if layout.edge_logo_margin_left_pct > 0 else 0
+            min_x_logo += min_x_logo % 2
+            max_avail_w = _make_even(src_w - min_x_logo, lo=64, hi=src_w)
+            target_crop_w = min(max_avail_w, max(p.crop_w for p in wide_shots))
+            target_s = win_w / float(target_crop_w)
+            target_out_h = min(win_h, _make_even(int(round(src_h * target_s)), lo=64, hi=win_h))
+            target_off_y = max(0, (win_h - target_out_h) // 2)
+            for p in plans:
+                if p.mode in ("two_shot_strip", "two_shot_cover", "center"):
+                    old_cx = p.crop_x + p.crop_w * 0.5
+                    new_x = int(round(max(min_x_logo, min(src_w - target_crop_w, old_cx - target_crop_w * 0.5))))
+                    new_x -= new_x % 2
+                    p.mode = "two_shot_strip"
+                    p.crop_x = new_x
+                    p.crop_y = 0
+                    p.crop_w = target_crop_w
+                    p.crop_h = src_h
+                    p.out_w = win_w
+                    p.out_h = target_out_h
+                    p.offset_y_in_window = target_off_y
+                    p.feather_px = layout.framing_feather_px
 
     report = {
         "framing_mode": mode,
@@ -790,19 +885,39 @@ def build_framing_filter_graph(
     next_input_idx: int,
     fg_in_label: str = "[fg_in]",
     out_label: str = "[v_stage0]",
+    never_black_bars: bool = True,
 ) -> Tuple[List[str], List[str], int]:
     """
     Translates per-shot framing plans into pure FFmpeg filtergraph stages (zero per-frame Python!):
       - Single shot cover -> direct crop + scale + grade + overlay on bg (maximum M5 speed!)
       - Wide strip (`two_shot_strip` / ref strip) -> crop + uniform scale + grade + fast static
         `alphamerge` 24px top/bottom feather overlaid at `y = win_top + offset_y_in_window` onto blurred bg!
-      - Multi-shot -> trim + crop + scale per shot + concat + grade!
-      - Split layout -> split into N subject panels + vstack!
+      - Multi-shot -> frame-exact `trim=start_frame:end_frame` + crop + scale per shot + concat!
+      - Never solid black bars: if bg_label is None and any shot has out_h < win_h, automatically
+        builds a blurred, enlarged copy of the same footage as background!
     Returns (extra_input_args, filter_parts, updated_next_input_idx).
     """
     extra_inputs: List[str] = []
     parts: List[str] = []
     inp_cursor = next_input_idx
+
+    has_narrow_strip = any(p.out_h < win_h for p in plans)
+    eff_bg_label = bg_label
+    eff_fg_in = fg_in_label
+    if eff_bg_label is None and has_narrow_strip and never_black_bars:
+        bg_w = max(64, int(round(win_w / 8.0)))
+        bg_h = max(64, int(round(win_h / 8.0)))
+        bg_w += bg_w % 2
+        bg_h += bg_h % 2
+        parts.append(f"{fg_in_label}split[auto_bg_in][auto_fg_in]")
+        parts.append(
+            f"[auto_bg_in]scale={bg_w}:{bg_h}:force_original_aspect_ratio=increase:flags=fast_bilinear,"
+            f"crop={bg_w}:{bg_h},gblur=sigma=5.0,"
+            f"scale={win_w}:{win_h}:flags=bilinear,setsar=1,"
+            f"eq=brightness=-0.10:saturation=1.10[auto_bg]"
+        )
+        eff_bg_label = "[auto_bg]"
+        eff_fg_in = "[auto_fg_in]"
 
     def _add_feather_input(w: int, h: int, fpx: int) -> str:
         nonlocal inp_cursor
@@ -826,18 +941,18 @@ def build_framing_filter_graph(
             panel_lbls = []
             for i, (px, py, cw, ch) in enumerate(p.split_crops):
                 pl = f"[{base_lbl}_p{i}]"
-                parts.append(f"{split_lbls[i]}crop={cw}:{ch}:{px}:{py},scale={win_w}:{panel_h},setsar=1{pl}")
+                parts.append(f"{split_lbls[i]}crop={cw}:{ch}:{px}:{py},scale={win_w}:{panel_h}:flags=lanczos,setsar=1{pl}")
                 panel_lbls.append(pl)
             parts.append("".join(panel_lbls) + f"vstack=inputs={n}{grade_expr}{out_lbl}")
             return
 
-        if p.out_h < win_h and p.feather_px > 0 and bg_label is not None:
+        if p.out_h < win_h and p.feather_px > 0 and eff_bg_label is not None:
             raw_lbl = f"[{base_lbl}_raw]"
-            parts.append(f"{inp}crop={p.crop_w}:{p.crop_h}:{p.crop_x}:{p.crop_y},scale={p.out_w}:{p.out_h},setsar=1{grade_expr},format=yuva420p{raw_lbl}")
+            parts.append(f"{inp}crop={p.crop_w}:{p.crop_h}:{p.crop_x}:{p.crop_y},scale={p.out_w}:{p.out_h}:flags=lanczos,setsar=1{grade_expr},format=yuva420p{raw_lbl}")
             mask_lbl = _add_feather_input(p.out_w, p.out_h, p.feather_px)
             parts.append(f"{raw_lbl}{mask_lbl}alphamerge=eof_action=repeat{out_lbl}")
         else:
-            parts.append(f"{inp}crop={p.crop_w}:{p.crop_h}:{p.crop_x}:{p.crop_y},scale={p.out_w}:{p.out_h},setsar=1{grade_expr}{out_lbl}")
+            parts.append(f"{inp}crop={p.crop_w}:{p.crop_h}:{p.crop_x}:{p.crop_y},scale={p.out_w}:{p.out_h}:flags=lanczos,setsar=1{grade_expr}{out_lbl}")
 
     same_plan = len(plans) == 1 or all(
         (p.mode, p.crop_x, p.crop_y, p.crop_w, p.crop_h, p.out_h, p.offset_y_in_window)
@@ -847,45 +962,52 @@ def build_framing_filter_graph(
 
     if same_plan:
         p0 = plans[0]
-        if bg_label is not None:
-            _single_shot_chain(p0, fg_in_label, "[fg_framed]")
+        if eff_bg_label is not None:
+            _single_shot_chain(p0, eff_fg_in, "[fg_framed]")
             oy = win_top + p0.offset_y_in_window
-            parts.append(f"{bg_label}[fg_framed]overlay=0:{oy}:shortest=1{out_label}")
+            parts.append(f"{eff_bg_label}[fg_framed]overlay=0:{oy}:shortest=1{out_label}")
         else:
             if p0.out_h < win_h:
-                _single_shot_chain(p0, fg_in_label, "[fg_framed]")
+                _single_shot_chain(p0, eff_fg_in, "[fg_framed]")
                 parts.append(f"[fg_framed]pad={win_w}:{win_h}:0:{p0.offset_y_in_window}:black{out_label}")
             else:
-                _single_shot_chain(p0, fg_in_label, out_label)
+                _single_shot_chain(p0, eff_fg_in, out_label)
         return extra_inputs, parts, inp_cursor
 
     n_shots = len(plans)
     in_lbls = [f"[sh_in_{i}]" for i in range(n_shots)]
-    parts.append(f"{fg_in_label}split={n_shots}" + "".join(in_lbls))
+    parts.append(f"{eff_fg_in}split={n_shots}" + "".join(in_lbls))
     seg_lbls: List[str] = []
     for i, p in enumerate(plans):
         trimmed = f"[sh_tr_{i}]"
         framed = f"[sh_fr_{i}]"
-        if i == n_shots - 1:
-            parts.append(f"{in_lbls[i]}trim=start={p.start_s:.4f},setpts=PTS-STARTPTS{trimmed}")
+        if p.start_frame is not None and (i == n_shots - 1 or p.end_frame is not None):
+            if i == n_shots - 1:
+                parts.append(f"{in_lbls[i]}trim=start_frame={p.start_frame},setpts=PTS-STARTPTS{trimmed}")
+            else:
+                parts.append(f"{in_lbls[i]}trim=start_frame={p.start_frame}:end_frame={p.end_frame},setpts=PTS-STARTPTS{trimmed}")
         else:
-            parts.append(f"{in_lbls[i]}trim=start={p.start_s:.4f}:end={p.end_s:.4f},setpts=PTS-STARTPTS{trimmed}")
+            if i == n_shots - 1:
+                parts.append(f"{in_lbls[i]}trim=start={p.start_s:.6f},setpts=PTS-STARTPTS{trimmed}")
+            else:
+                parts.append(f"{in_lbls[i]}trim=start={p.start_s:.6f}:end={p.end_s:.6f},setpts=PTS-STARTPTS{trimmed}")
+
         if p.out_h < win_h:
             raw_lbl = f"[sh_raw_{i}]"
             feath_lbl = f"[sh_fe_{i}]"
-            parts.append(f"{trimmed}crop={p.crop_w}:{p.crop_h}:{p.crop_x}:{p.crop_y},scale={p.out_w}:{p.out_h},setsar=1{grade_expr},format=yuva420p{raw_lbl}")
+            parts.append(f"{trimmed}crop={p.crop_w}:{p.crop_h}:{p.crop_x}:{p.crop_y},scale={p.out_w}:{p.out_h}:flags=lanczos,setsar=1{grade_expr},format=yuva420p{raw_lbl}")
             mask_lbl = _add_feather_input(p.out_w, p.out_h, max(1, p.feather_px))
             parts.append(f"{raw_lbl}{mask_lbl}alphamerge=eof_action=repeat{feath_lbl}")
             parts.append(f"{feath_lbl}pad={win_w}:{win_h}:0:{p.offset_y_in_window}:color=black@0,setsar=1{framed}")
         else:
             parts.append(
-                f"{trimmed}crop={p.crop_w}:{p.crop_h}:{p.crop_x}:{p.crop_y},scale={win_w}:{win_h},setsar=1{grade_expr},format=yuva420p{framed}"
+                f"{trimmed}crop={p.crop_w}:{p.crop_h}:{p.crop_x}:{p.crop_y},scale={win_w}:{win_h}:flags=lanczos,setsar=1{grade_expr},format=yuva420p{framed}"
             )
         seg_lbls.append(framed)
 
     parts.append("".join(seg_lbls) + f"concat=n={n_shots}:v=1:a=0[fg_framed]")
-    if bg_label is not None:
-        parts.append(f"{bg_label}[fg_framed]overlay=0:{win_top}:shortest=1{out_label}")
+    if eff_bg_label is not None:
+        parts.append(f"{eff_bg_label}[fg_framed]overlay=0:{win_top}:shortest=1{out_label}")
     else:
         parts.append(f"[fg_framed]format=yuv420p{out_label}")
     return extra_inputs, parts, inp_cursor

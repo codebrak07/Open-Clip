@@ -147,6 +147,7 @@ db.exec(`
     output_path TEXT,
     subtitles_path TEXT,
     timeline_path TEXT,
+    seo_json TEXT,
     FOREIGN KEY(job_id) REFERENCES jobs(id)
   );
 
@@ -220,6 +221,16 @@ db.exec(`
     updated_at INTEGER NOT NULL
   );
 `);
+
+// Safe additive migration for existing SQLite databases
+try {
+  const cols = db.prepare("PRAGMA table_info('clips')").all() as Array<{ name: string }>;
+  if (!cols.some((c) => c.name === 'seo_json')) {
+    db.exec('ALTER TABLE clips ADD COLUMN seo_json TEXT');
+  }
+} catch {
+  // Ignore if already migrated
+}
 
 export interface FootballMatch {
   id: string;
@@ -321,6 +332,7 @@ export interface Clip {
   output_path?: string | null;
   subtitles_path?: string | null;
   timeline_path?: string | null;
+  seo_json?: string | null;
 }
 
 export interface SemanticChunk {

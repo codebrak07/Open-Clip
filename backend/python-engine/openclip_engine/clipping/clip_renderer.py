@@ -50,6 +50,7 @@ from openclip_engine.clipping.karaoke_pop import (
 from openclip_engine.clipping.sfx_director import (
     PlannedCue,
     build_sfx_audio_filter,
+    detect_opening_stray_frames,
     detect_scene_cuts,
     plan_sfx_cues,
     write_sfx_cues_json,
@@ -227,6 +228,64 @@ def _compute_smart_crop_x_expr(
         return None
 
 
+def _fps_to_rational_str(fps: float) -> str:
+    """Preserves exact NTSC rational rates like 30000/1001 (29.97) and 24000/1001 (23.976)."""
+    if abs(fps - (30000.0 / 1001.0)) < 0.01:
+        return "30000/1001"
+    if abs(fps - (24000.0 / 1001.0)) < 0.01:
+        return "24000/1001"
+    if abs(fps - (60000.0 / 1001.0)) < 0.02:
+        return "60000/1001"
+    return f"{fps:.6f}".rstrip("0").rstrip(".")
+
+
+def _measure_loudnorm_pass1(
+    video_in: Path,
+    clip_start: float,
+    duration: float,
+    pre_af_chain: str,
+    sfx_inputs: Sequence[str],
+    sfx_filter: Optional[str],
+    sfx_audio_lbl: Optional[str],
+    layout: LayoutStyle,
+    ffmpeg_bin: str,
+    seek_source: bool,
+) -> Optional[Dict[str, str]]:
+    """Runs FFmpeg two-pass loudnorm measurement (Pass 1) and returns parsed JSON stats."""
+    cmd: List[str] = [ffmpeg_bin, "-hide_banner", "-v", "info"]
+    if seek_source and clip_start > 0.001:
+        cmd.extend(["-ss", f"{clip_start:.6f}"])
+    if seek_source:
+        cmd.extend(["-t", f"{duration:.6f}"])
+    cmd.extend(["-i", str(video_in)])
+    cmd.extend(sfx_inputs)
+
+    ln_meas = (
+        f"loudnorm=I={layout.audio_target_lufs:.2f}:TP={layout.audio_target_tp_db:.2f}:"
+        f"LRA={layout.audio_target_lra:.1f}:print_format=json"
+    )
+    if sfx_filter and sfx_audio_lbl:
+        # Remap input indices in sfx_filter for audio-only pass: video_in is 0, sfx starts at 1
+        fc = f"{sfx_filter};{sfx_audio_lbl}{pre_af_chain}{ln_meas}[a_ln_out]"
+        cmd.extend(["-vn", "-filter_complex", fc, "-map", "[a_ln_out]", "-f", "null", "-"])
+    else:
+        af = f"{pre_af_chain.lstrip(',')}{ln_meas}"
+        cmd.extend(["-vn", "-af", af, "-f", "null", "-"])
+
+    try:
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        m = re.search(r"\{[^{}]*\"input_i\"[^{}]*\}", res.stderr, re.S)
+        if not m:
+            return None
+        parsed = json.loads(m.group(0))
+        required = ("input_i", "input_tp", "input_lra", "input_thresh", "target_offset")
+        if all(k in parsed for k in required):
+            return {k: str(parsed[k]) for k in required}
+    except Exception:
+        return None
+    return None
+
+
 def _select_video_encoder_args(
     layout: LayoutStyle,
     ffmpeg_bin: str = "ffmpeg",
@@ -234,12 +293,17 @@ def _select_video_encoder_args(
     force_x264: bool = False,
 ) -> Tuple[List[str], str]:
     """
-    Returns (encoder_args, encoder_label) honoring M5 rules:
+    Returns (encoder_args, encoder_label) honoring M5 rules + BT.709 High profile tags:
       - fast:     h264_videotoolbox 8M
       - balanced: h264_videotoolbox 12M (default)
       - max:      libx264 -preset slow -crf 18
       - fallback: libx264 -preset veryfast -crf 20 -threads <x264_threads>
     """
+    color_tags = (
+        ["-profile:v", "high", "-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709"]
+        if layout.bt709_tags
+        else []
+    )
     q = (layout.quality or "balanced").strip().lower()
     if q == "max":
         return [
@@ -248,6 +312,7 @@ def _select_video_encoder_args(
             "-crf", str(layout.x264_crf_max),
             "-threads", str(x264_threads),
             "-pix_fmt", "yuv420p",
+            *color_tags,
         ], "libx264_max"
 
     if (not force_x264) and check_videotoolbox_available(ffmpeg_bin):
@@ -258,6 +323,7 @@ def _select_video_encoder_args(
             "-maxrate", layout.vt_maxrate,
             "-pix_fmt", "yuv420p",
             "-tag:v", "avc1",
+            *color_tags,
         ], f"h264_videotoolbox_{br}"
 
     return [
@@ -266,6 +332,7 @@ def _select_video_encoder_args(
         "-crf", str(layout.x264_crf_fallback),
         "-threads", str(x264_threads),
         "-pix_fmt", "yuv420p",
+        *color_tags,
     ], "libx264_fallback"
 
 
@@ -332,10 +399,18 @@ def prepare_clip_assets(
     work_dir.mkdir(parents=True, exist_ok=True)
 
     src_w, src_h, fps, src_dur = probe_video_stream(vid_p, ffmpeg_bin)
+    if layout.output_fps_cap > 0.0 and fps > layout.output_fps_cap + 0.5:
+        fps = layout.output_fps_cap
     has_audio, audio_codec = probe_audio_stream(vid_p, ffmpeg_bin)
 
     if seek_source:
         eff_end = clip_end if clip_end is not None else src_dur
+        if layout.trim_opening_stray_frames and detect_scenes:
+            stray_k = detect_opening_stray_frames(
+                vid_p, clip_start=clip_start, fps=fps, ffmpeg_bin=ffmpeg_bin
+            )
+            if stray_k > 0 and (eff_end - (clip_start + stray_k / max(1.0, fps))) >= 1.0:
+                clip_start = clip_start + (stray_k / fps)
         duration = max(0.2, min(src_dur - clip_start, eff_end - clip_start))
         probe_ss = clip_start
     else:
@@ -465,6 +540,7 @@ def prepare_clip_assets(
             layout=layout,
             ffmpeg_bin=ffmpeg_bin,
             ref_boxes_override=ref_boxes_override,
+            fps=fps,
         )
     timings["framing_plan_s"] = round(det_wall_s + (time.perf_counter() - t_fr), 4)
 
@@ -526,8 +602,10 @@ def execute_ffmpeg_render(
     """
     t0 = time.perf_counter()
     cores = max(1, os.cpu_count() or 4)
-    fps_arg = f"{assets.fps:.6f}".rstrip("0").rstrip(".")
+    fps_arg = _fps_to_rational_str(assets.fps)
     win_w, win_h, win_top = layout.resolved_window_dims()
+    n_vid_frames = max(1, int(round(assets.duration * assets.fps)))
+    exact_dur = n_vid_frames / max(1.0, assets.fps)
 
     cmd: List[str] = [
         ffmpeg_bin, "-y", "-loglevel", "error",
@@ -540,9 +618,9 @@ def execute_ffmpeg_render(
 
     # Input 0: source video (fast input seeking before -i -> decode ONLY the clip segment)
     if seek_source and assets.clip_start > 0.001:
-        cmd.extend(["-ss", f"{assets.clip_start:.3f}"])
+        cmd.extend(["-ss", f"{assets.clip_start:.6f}"])
     if seek_source:
-        cmd.extend(["-t", f"{assets.duration:.3f}"])
+        cmd.extend(["-t", f"{exact_dur + 0.20:.6f}"])
     cmd.extend(["-i", str(assets.video_in)])
 
     next_inp = 1
@@ -577,7 +655,7 @@ def execute_ffmpeg_render(
     use_m6b_framing = (
         layout.fit_mode != "contain"
         and bool(assets.framing_plans)
-        and any(p.mode != "center" for p in assets.framing_plans)
+        and (any(p.mode != "center" for p in assets.framing_plans) or layout.edge_logo_margin_left_pct > 0.0)
     )
 
     if layout.blur_enabled:
@@ -604,19 +682,20 @@ def execute_ffmpeg_render(
                 next_input_idx=next_inp,
                 fg_in_label="[fg_in]",
                 out_label="[v_stage0]",
+                never_black_bars=layout.never_black_bars,
             )
             cmd.extend(fr_inputs)
             fg_parts.extend(fr_parts)
         else:
             if layout.fit_mode == "contain":
-                fg_geom = (
-                    f"scale={win_w}:{win_h}:force_original_aspect_ratio=decrease,"
-                    f"pad={win_w}:{win_h}:(ow-iw)/2:(oh-ih)/2:black,setsar=1"
-                )
+                # Overlay crisp horizontal/contained foreground directly over zoomed blurred BG (zero black bars!)
+                fg_geom = f"scale={win_w}:{win_h}:force_original_aspect_ratio=decrease:flags=lanczos,setsar=1"
+                fg_parts.append(f"[fg_in]{fg_geom}{fg_grade}[fg]")
+                fg_parts.append(f"[bg][fg]overlay=(W-w)/2:{win_top}+({win_h}-h)/2:shortest=1[v_stage0]")
             else:
                 fg_geom = f"scale={win_w}:{win_h}:force_original_aspect_ratio=increase,crop={win_w}:{win_h},setsar=1"
-            fg_parts.append(f"[fg_in]{fg_geom}{fg_grade}[fg]")
-            fg_parts.append(f"[bg][fg]overlay=0:{win_top}:shortest=1[v_stage0]")
+                fg_parts.append(f"[fg_in]{fg_geom}{fg_grade}[fg]")
+                fg_parts.append(f"[bg][fg]overlay=0:{win_top}:shortest=1[v_stage0]")
         cur_v = "[v_stage0]"
     else:
         if use_m6b_framing:
@@ -632,6 +711,7 @@ def execute_ffmpeg_render(
                 next_input_idx=next_inp,
                 fg_in_label="[fg_in]",
                 out_label="[v_stage0]",
+                never_black_bars=layout.never_black_bars,
             )
             cmd.extend(fr_inputs)
             fg_parts.extend(fr_parts)
@@ -664,29 +744,114 @@ def execute_ffmpeg_render(
         fg_parts.append(f"{cur_v}[ttl_s]overlay=0:0:eof_action=repeat:format=auto[v_stage2]")
         cur_v = "[v_stage2]"
 
-    # Single final pixel format conversion
-    fg_parts.append(f"{cur_v}format=yuv420p[vout]")
+    # Single final pixel format conversion (trim video strictly to n_vid_frames when seek_source)
+    if seek_source and layout.exact_av_sync:
+        fg_parts.append(f"{cur_v}trim=end_frame={n_vid_frames},setpts=PTS-STARTPTS,format=yuv420p[vout]")
+    else:
+        fg_parts.append(f"{cur_v}format=yuv420p[vout]")
 
+    # Audio mastering chain (highpass, dialogue EQ, two-pass linear loudnorm, 48kHz, fade-out, exact A/V sync)
+    need_audio_master = (
+        assets.has_audio
+        and (
+            layout.audio_loudnorm_enabled
+            or layout.audio_highpass_hz > 0.0
+            or layout.audio_dialogue_eq
+            or layout.audio_fade_out_ms > 0.0
+        )
+    )
+    final_audio_lbl: Optional[str] = sfx_audio_lbl
     if sfx_filter:
         fg_parts.append(sfx_filter)
+
+    if need_audio_master:
+        pre_filters: List[str] = []
+        if layout.audio_highpass_hz > 0.0:
+            pre_filters.append(f"highpass=f={layout.audio_highpass_hz:.1f}:poles=2")
+        if layout.audio_dialogue_eq:
+            # Reduce muddy 120/197/393 Hz low-end drone bed and lift 2.8 kHz speech intelligibility
+            pre_filters.extend([
+                "equalizer=f=120:t=q:w=1.2:g=-3.5",
+                "equalizer=f=197:t=q:w=1.8:g=-5.5",
+                "equalizer=f=393:t=q:w=2.0:g=-3.5",
+                "equalizer=f=2800:t=q:w=1.2:g=2.5",
+            ])
+        pre_chain = ("," + ",".join(pre_filters) + ",") if pre_filters else ","
+
+        post_filters: List[str] = list(pre_filters)
+        if layout.audio_loudnorm_enabled:
+            # Measure Pass 1 on audio-only inputs (sfx indices start at 1 when audio-only)
+            p1_sfx_in, p1_sfx_flt, p1_sfx_lbl = build_sfx_audio_filter(
+                assets.sfx_cues, first_input_idx=1, has_source_audio=assets.has_audio, sfx_config=sfx_config
+            )
+            stats = _measure_loudnorm_pass1(
+                assets.video_in,
+                clip_start=assets.clip_start,
+                duration=exact_dur,
+                pre_af_chain=pre_chain,
+                sfx_inputs=p1_sfx_in,
+                sfx_filter=p1_sfx_flt,
+                sfx_audio_lbl=p1_sfx_lbl,
+                layout=layout,
+                ffmpeg_bin=ffmpeg_bin,
+                seek_source=seek_source,
+            )
+            if stats is not None:
+                post_filters.append(
+                    f"loudnorm=I={layout.audio_target_lufs:.2f}:TP={layout.audio_target_tp_db:.2f}:"
+                    f"LRA={layout.audio_target_lra:.1f}:measured_I={stats['input_i']}:"
+                    f"measured_TP={stats['input_tp']}:measured_LRA={stats['input_lra']}:"
+                    f"measured_thresh={stats['input_thresh']}:offset={stats['target_offset']}:linear=true"
+                )
+            else:
+                post_filters.append(
+                    f"loudnorm=I={layout.audio_target_lufs:.2f}:TP={layout.audio_target_tp_db:.2f}:"
+                    f"LRA={layout.audio_target_lra:.1f}"
+                )
+
+        post_filters.append(f"aresample={layout.audio_sample_rate}")
+        if layout.exact_av_sync:
+            post_filters.append(f"apad=whole_dur={exact_dur:.6f}")
+            post_filters.append(f"atrim=0:{exact_dur:.6f}")
+            post_filters.append("asetpts=PTS-STARTPTS")
+        if layout.audio_fade_out_ms > 0.0:
+            fade_d = min(exact_dur * 0.4, layout.audio_fade_out_ms / 1000.0)
+            fade_st = max(0.0, exact_dur - fade_d)
+            post_filters.append(f"afade=t=out:st={fade_st:.6f}:d={fade_d:.6f}:curve=tri")
+
+        src_a_lbl = final_audio_lbl if final_audio_lbl is not None else "[0:a:0]"
+        fg_parts.append(f"{src_a_lbl}{','.join(post_filters)}[a_master]")
+        final_audio_lbl = "[a_master]"
+    elif final_audio_lbl is not None and layout.exact_av_sync:
+        fg_parts.append(
+            f"{final_audio_lbl}aresample={layout.audio_sample_rate},apad=whole_dur={exact_dur:.6f},"
+            f"atrim=0:{exact_dur:.6f},asetpts=PTS-STARTPTS[a_sync]"
+        )
+        final_audio_lbl = "[a_sync]"
 
     cmd.extend(["-filter_complex", ";".join(fg_parts)])
     cmd.extend(["-map", "[vout]"])
 
-    # Audio mapping & codec
-    if sfx_audio_lbl is not None:
-        cmd.extend(["-map", sfx_audio_lbl, "-c:a", "aac", "-b:a", layout.audio_bitrate])
+    # Audio mapping & codec (48 kHz stereo AAC >= 192k when encoding)
+    if final_audio_lbl is not None:
+        cmd.extend([
+            "-map", final_audio_lbl,
+            "-c:a", "aac", "-ar", str(layout.audio_sample_rate), "-ac", "2", "-b:a", layout.audio_bitrate,
+        ])
     elif assets.has_audio:
         cmd.extend(["-map", "0:a:0"])
         if (sfx_config.mode or "").strip().lower() == "off" and assets.audio_codec in ("aac", "mp3", "alac"):
             cmd.extend(["-c:a", "copy"])
         else:
-            cmd.extend(["-c:a", "aac", "-b:a", layout.audio_bitrate])
+            cmd.extend([
+                "-c:a", "aac", "-ar", str(layout.audio_sample_rate), "-ac", "2", "-b:a", layout.audio_bitrate,
+            ])
 
     enc_args, enc_label = _select_video_encoder_args(
         layout, ffmpeg_bin=ffmpeg_bin, x264_threads=x264_threads, force_x264=force_x264
     )
     cmd.extend(enc_args)
+    cmd.extend(["-vsync", "cfr", "-r", fps_arg])
     cmd.extend(["-movflags", "+faststart", str(assets.out_path)])
 
     res = subprocess.run(cmd, capture_output=True, text=True, timeout=300)

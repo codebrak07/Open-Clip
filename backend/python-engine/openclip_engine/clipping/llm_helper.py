@@ -67,18 +67,33 @@ def call_provider_json(
         key = GROQ_API_KEY or os.getenv("GROQ_API_KEY", "")
         if not key:
             return None
-        try:
-            msgs = ([{"role": "system", "content": system_prompt}] if system_prompt else []) + [{"role": "user", "content": prompt}]
-            resp = httpx.post(
-                "https://api.groq.com/openai/v1/chat/completions",
-                headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
-                json={"model": "llama-3.3-70b-versatile", "messages": msgs, "temperature": temperature, "max_tokens": 1024},
-                timeout=timeout_s,
-            )
-            if resp.status_code == 200:
-                return _extract_json_block(resp.json()["choices"][0]["message"]["content"])
-        except Exception:
-            return None
+        msgs = ([{"role": "system", "content": system_prompt}] if system_prompt else []) + [{"role": "user", "content": prompt}]
+        groq_models = [os.getenv("GROQ_MODEL")] if os.getenv("GROQ_MODEL") else ["openai/gpt-oss-20b", "openai/gpt-oss-120b", "llama-3.3-70b-versatile"]
+        for model_id in groq_models:
+            if not model_id:
+                continue
+            try:
+                payload: dict[str, Any] = {
+                    "model": model_id,
+                    "messages": msgs,
+                    "temperature": temperature,
+                    "max_tokens": 2048 if model_id.startswith("openai/gpt-oss-") else 1024,
+                }
+                if model_id.startswith("openai/gpt-oss-"):
+                    payload["reasoning_effort"] = "low"
+                resp = httpx.post(
+                    "https://api.groq.com/openai/v1/chat/completions",
+                    headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+                    json=payload,
+                    timeout=timeout_s,
+                )
+                if resp.status_code == 200:
+                    msg_content = resp.json()["choices"][0]["message"].get("content") or ""
+                    parsed = _extract_json_block(msg_content)
+                    if parsed is not None:
+                        return parsed
+            except Exception:
+                continue
         return None
 
     if pname == "nvidia":

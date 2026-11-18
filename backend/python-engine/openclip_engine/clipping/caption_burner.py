@@ -516,13 +516,56 @@ def build_reframe_and_caption_clip(
     clip_end: Optional[float] = None,
     hook_sentence: Optional[str] = None,
     title: Optional[str] = None,
+    is_live: bool = False,
 ) -> Path:
     """
     Produces a crisp 1080p reframed MP4 in the chosen aspect ratio with animated burnt-in captions.
-    Supports Hormozi, Kinetic (lime/cyan vertical blur), KaraokePop (1-word Times New Roman neon
-    glow + vertical Gaussian smear + syllable highlight), Minimalist, and Banner.
+    For live streams (`is_live=True`), uses the fast zoomed blurred-background + horizontal middle
+    livestream layout (`LIVE_HORIZONTAL_BLUR_LAYOUT`) with captions below the gameplay + voice + SFX.
     """
     style_check = (caption_style or "Hormozi").strip().lower()
+    if is_live and aspect_ratio in ("9:16", "4:5", "3:4"):
+        from dataclasses import replace as dc_replace
+        from openclip_engine.clipping.clip_renderer import render_polished_clip
+        from openclip_engine.clipping.config_styles import (
+            BOLD_CHUNK_CAPTIONS,
+            DEFAULT_SFX_CONFIG,
+            KARAOKE_POP,
+            LIVE_HORIZONTAL_BLUR_LAYOUT,
+        )
+        from openclip_engine.clipping.karaoke_pop import cues_to_words
+
+        source_cues = raw_all_cues if raw_all_cues is not None else cues
+        words = cues_to_words(source_cues)
+        eff_start = clip_start if raw_all_cues is not None else 0.0
+        eff_end = clip_end if (clip_end is not None and raw_all_cues is not None) else _probe_duration(raw_clip_path, ffmpeg_bin)
+        is_kp = style_check in ("karaoke_pop", "karaokepop", "karaoke", "karaoke pop", "karaoke-pop", "serif pop")
+        layout = dc_replace(
+            LIVE_HORIZONTAL_BLUR_LAYOUT,
+            title_enabled=is_kp,
+            window_top=656 if not is_kp else 620,
+        )
+        # Position captions cleanly below the centered 16:9 horizontal gameplay window (y ~ 1380 on 1080x1920)
+        cap_base = KARAOKE_POP if is_kp else BOLD_CHUNK_CAPTIONS
+        cap_style = dc_replace(cap_base, center_y_pct=1.18)
+        sfx_cfg = dc_replace(DEFAULT_SFX_CONFIG, mode="rules", master_db=-3.0)
+        return render_polished_clip(
+            video_in=raw_clip_path,
+            words=words,
+            out_path=final_clip_path,
+            clip_start=eff_start,
+            clip_end=eff_end,
+            title=title,
+            hook_sentence=hook_sentence,
+            layout=layout,
+            caption_style=cap_style,
+            sfx_config=sfx_cfg,
+            ffmpeg_bin=ffmpeg_bin,
+            seek_source=False,
+            use_llm=False,
+            detect_scenes=False,  # Fast path for horizontal-middle live clips
+        )
+
     if style_check in ("karaoke_pop", "karaokepop", "karaoke", "karaoke pop", "karaoke-pop", "serif pop"):
         from openclip_engine.clipping.karaoke_pop import build_karaoke_pop_clip
 
@@ -538,6 +581,40 @@ def build_reframe_and_caption_clip(
             ffmpeg_bin=ffmpeg_bin,
             title=title,
             hook_sentence=hook_sentence,
+        )
+
+    if style_check in ("hormozi", "hormozi amber", "clean_bold", "bold_chunk", "bold") and aspect_ratio in ("9:16", "4:5", "3:4"):
+        from dataclasses import replace as dc_replace
+        from openclip_engine.clipping.clip_renderer import render_polished_clip
+        from openclip_engine.clipping.config_styles import (
+            BOLD_CHUNK_CAPTIONS,
+            CLEAN_4_5_LAYOUT,
+            CLEAN_REELS_LAYOUT,
+            DEFAULT_SFX_CONFIG,
+        )
+        from openclip_engine.clipping.karaoke_pop import cues_to_words
+
+        source_cues = raw_all_cues if raw_all_cues is not None else cues
+        words = cues_to_words(source_cues)
+        eff_start = clip_start if raw_all_cues is not None else 0.0
+        eff_end = clip_end if (clip_end is not None and raw_all_cues is not None) else _probe_duration(raw_clip_path, ffmpeg_bin)
+        base_lay = CLEAN_4_5_LAYOUT if aspect_ratio == "4:5" else CLEAN_REELS_LAYOUT
+        layout = dc_replace(base_lay, quality="balanced")
+        sfx_cfg = dc_replace(DEFAULT_SFX_CONFIG, mode="rules", master_db=-3.0)
+        return render_polished_clip(
+            video_in=raw_clip_path,
+            words=words,
+            out_path=final_clip_path,
+            clip_start=eff_start,
+            clip_end=eff_end,
+            title=title,
+            hook_sentence=hook_sentence,
+            layout=layout,
+            caption_style=BOLD_CHUNK_CAPTIONS,
+            sfx_config=sfx_cfg,
+            ffmpeg_bin=ffmpeg_bin,
+            seek_source=False,
+            use_llm=False,
         )
 
     target_w, target_h = ASPECT_DIMS.get(aspect_ratio, (1080, 1920))

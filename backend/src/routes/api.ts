@@ -116,6 +116,10 @@ router.post('/jobs/youtube/import', async (req, res) => {
       aspectRatio = '9:16',
       captionStyle = 'Hormozi',
       clipCount: requestedClipCount = 5,
+      liveMode = 'live_and_behind',
+      dvrBehindSec = 900,
+      aiHookIntro = true,
+      narratorVoice = 'en-US-ChristopherNeural',
     } = req.body;
 
     if (!url || typeof url !== 'string') {
@@ -123,16 +127,28 @@ router.post('/jobs/youtube/import', async (req, res) => {
     }
 
     const clipCount = Math.max(1, Math.min(20, parseInt(requestedClipCount as any, 10) || 5));
+    const safeDvrBehind = Math.max(60, Math.min(7200, parseInt(dvrBehindSec as any, 10) || 900));
+    const safeLiveMode = ['live_and_behind', 'live', 'behind'].includes(String(liveMode))
+      ? String(liveMode)
+      : 'live_and_behind';
+    const safeAiHookIntro = aiHookIntro !== false && String(aiHookIntro).toLowerCase() !== 'false';
+    const safeVoice = typeof narratorVoice === 'string' && narratorVoice.trim()
+      ? narratorVoice.trim()
+      : 'en-US-ChristopherNeural';
     const jobId = 'job_' + Date.now();
     const now = Date.now();
 
-    // 1. Extract real 1080p HD clips in parallel with smart reframe & burnt-in captions
+    // 1. Extract real 1080p HD clips in parallel with smart reframe & burnt-in captions (supports Live + DVR + AI Hook Intro!)
     const extracted = await PythonEngineBridge.extractYouTubeClips(
       url,
       jobId,
       clipCount,
       aspectRatio,
-      captionStyle
+      captionStyle,
+      safeLiveMode,
+      safeDvrBehind,
+      safeAiHookIntro,
+      safeVoice
     );
     const meta = extracted.metadata || {};
     const primaryVideoPath = extracted.clips[0]?.output_path || null;
@@ -178,18 +194,26 @@ router.post('/jobs/youtube/import', async (req, res) => {
     ];
 
     const insertClip = db.prepare(`
-      INSERT INTO clips (id, job_id, start_time, end_time, score, title, hook_rationale, render_status, output_path, subtitles_path)
-      VALUES (?, ?, ?, ?, ?, ?, ?, 'completed', ?, ?)
+      INSERT INTO clips (id, job_id, start_time, end_time, score, title, hook_rationale, render_status, output_path, subtitles_path, seo_json)
+      VALUES (?, ?, ?, ?, ?, ?, ?, 'completed', ?, ?, ?)
     `);
 
     for (let i = 0; i < extracted.clips.length; i++) {
       const seg = extracted.clips[i];
       const template = candidateTemplates[i % candidateTemplates.length];
       const score = typeof seg.score === 'number' ? seg.score : Math.max(78, 97 - i * 2);
-      const clipTitle = seg.title && seg.title.trim() ? seg.title.trim() : template.title;
+      const clipTitle = (seg.yt_title || seg.title || '').trim() || template.title;
       const rationale = seg.hook_rationale && seg.hook_rationale.trim()
         ? (seg.hook_sentence ? `"${seg.hook_sentence}" — ${seg.hook_rationale}` : seg.hook_rationale)
         : (seg.transcript_preview ? `"${seg.transcript_preview}" — ${template.rationale}` : template.rationale);
+      const seoPayload = seg.seo || (seg.yt_title || seg.description || seg.tags?.length || seg.hashtags?.length
+        ? {
+            yt_title: clipTitle,
+            description: seg.description || '',
+            tags: seg.tags || [],
+            hashtags: seg.hashtags || [],
+          }
+        : null);
 
       insertClip.run(
         seg.id,
@@ -200,7 +224,8 @@ router.post('/jobs/youtube/import', async (req, res) => {
         clipTitle,
         rationale,
         seg.output_path,
-        seg.subtitles_path || null
+        seg.subtitles_path || null,
+        seoPayload ? JSON.stringify(seoPayload) : null
       );
     }
 
@@ -208,13 +233,28 @@ router.post('/jobs/youtube/import', async (req, res) => {
     const clips = db.prepare('SELECT * FROM clips WHERE job_id = ? ORDER BY score DESC').all(jobId) as Clip[];
     const videoStreamUrl = primaryVideoPath ? `/outputs/${path.basename(primaryVideoPath)}` : `/api/jobs/${jobId}/video`;
 
-    const formattedClips = clips.map(c => ({
-      ...c,
-      video_url: c.output_path && fs.existsSync(c.output_path)
-        ? `/outputs/${path.basename(c.output_path)}`
-        : videoStreamUrl,
-      subtitles_url: c.subtitles_path ? `/outputs/${path.basename(c.subtitles_path)}` : null,
-    }));
+    const parseSeo = (raw?: string | null) => {
+      if (!raw) return null;
+      try { return JSON.parse(raw); } catch { return null; }
+    };
+
+    const formattedClips = clips.map(c => {
+      const seo = parseSeo(c.seo_json);
+      return {
+        ...c,
+        yt_title: seo?.yt_title || c.title,
+        description: seo?.description || '',
+        tags: seo?.tags || [],
+        hashtags: seo?.hashtags || [],
+        hook_narration: seo?.hook_narration || '',
+        intro_duration: seo?.intro_duration || 0,
+        seo,
+        video_url: c.output_path && fs.existsSync(c.output_path)
+          ? `/outputs/${path.basename(c.output_path)}`
+          : videoStreamUrl,
+        subtitles_url: c.subtitles_path ? `/outputs/${path.basename(c.subtitles_path)}` : null,
+      };
+    });
 
     res.status(201).json({
       success: true,
@@ -445,13 +485,26 @@ router.get('/jobs/:id/clips', (req, res) => {
 
     const clips = db.prepare('SELECT * FROM clips WHERE job_id = ? ORDER BY score DESC').all(id) as Clip[];
     
-    const formattedClips = clips.map(c => ({
-      ...c,
-      video_url: c.output_path && fs.existsSync(c.output_path)
-        ? `/outputs/${path.basename(c.output_path)}`
-        : defaultVideoUrl,
-      subtitles_url: c.subtitles_path ? `/outputs/${path.basename(c.subtitles_path)}` : null,
-    }));
+    const formattedClips = clips.map(c => {
+      let seo: any = null;
+      if (c.seo_json) {
+        try { seo = JSON.parse(c.seo_json); } catch { seo = null; }
+      }
+      return {
+        ...c,
+        yt_title: seo?.yt_title || c.title,
+        description: seo?.description || '',
+        tags: seo?.tags || [],
+        hashtags: seo?.hashtags || [],
+        hook_narration: seo?.hook_narration || '',
+        intro_duration: seo?.intro_duration || 0,
+        seo,
+        video_url: c.output_path && fs.existsSync(c.output_path)
+          ? `/outputs/${path.basename(c.output_path)}`
+          : defaultVideoUrl,
+        subtitles_url: c.subtitles_path ? `/outputs/${path.basename(c.subtitles_path)}` : null,
+      };
+    });
 
     res.json({ clips: formattedClips });
   } catch (err: any) {

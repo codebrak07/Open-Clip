@@ -101,8 +101,20 @@ def extract_clips(
     caption_style: str = "Hormozi",
     hook_mode: str = typer.Option("balanced", "--hook-mode", help="Hook mode: strict | balanced | loose"),
     hook_hint: Optional[str] = typer.Option(None, "--hook-hint", help="Words describing the target hook moment"),
+    live_mode: str = typer.Option("live_and_behind", "--live-mode", help="Live capture: live_and_behind | live | behind"),
+    dvr_behind_sec: int = typer.Option(900, "--dvr-behind-sec", help="DVR rewind lookback window behind live (seconds)"),
+    ai_hook_intro: bool = typer.Option(
+        True,
+        "--ai-hook-intro/--no-ai-hook-intro",
+        help="Prepend a Cold-Open Peak Preview + Male AI Narrator Hook Intro before each clip",
+    ),
+    narrator_voice: str = typer.Option(
+        "en-US-ChristopherNeural",
+        "--narrator-voice",
+        help="Male AI narrator voice (e.g. en-US-ChristopherNeural, en-US-GuyNeural, en-US-EricNeural)",
+    ),
 ):
-    """Extracts multiple real 1080p HD MP4 clips in parallel using M6a hook selection, M6b framing, and burnt-in captions."""
+    """Extracts multiple real 1080p HD MP4 clips in parallel (supports VODs, Shorts, and active Live + DVR streams)."""
     result = YtDlpClient.extract_clips_parallel(
         url,
         job_id=job_id,
@@ -112,8 +124,41 @@ def extract_clips(
         caption_style=caption_style,
         hook_mode=hook_mode,
         hook_hint=hook_hint,
+        live_mode=live_mode,
+        dvr_behind_sec=dvr_behind_sec,
+        ai_hook_intro=ai_hook_intro,
+        narrator_voice=narrator_voice,
     )
     print(json.dumps(result))
+
+
+@app.command(name="add-hook-intro")
+def add_hook_intro_cmd(
+    clip_path: str,
+    raw_source: Optional[str] = typer.Option(None, "--raw-source", help="Optional clean caption-free source clip for the preview slice"),
+    streamer: str = typer.Option("", "--streamer", help="Streamer/creator name (e.g. IShowSpeed, Mythpat)"),
+    title: str = typer.Option("", "--title", help="Video/stream title context"),
+    transcript: str = typer.Option("", "--transcript", help="Clip transcript context"),
+    narration: Optional[str] = typer.Option(None, "--narration", help="Optional exact narrator hook script override"),
+    voice: str = typer.Option("en-US-ChristopherNeural", "--voice", help="Male AI narrator voice"),
+    is_live: bool = typer.Option(False, "--is-live", help="Use zoomed-blur + horizontal middle layout for the preview"),
+    no_llm: bool = typer.Option(False, "--no-llm", help="Use deterministic narrator script without LLM"),
+):
+    """Prepends a Cold-Open Peak Preview + Male AI Narrator Hook Intro onto any local clip MP4."""
+    from openclip_engine.clipping.hook_intro import prepend_ai_hook_intro
+
+    meta = prepend_ai_hook_intro(
+        main_clip_path=Path(clip_path),
+        raw_source_path=Path(raw_source) if raw_source else None,
+        transcript=transcript,
+        video_title=title,
+        uploader=streamer,
+        is_live=is_live,
+        narrator_voice=voice,
+        narration_override=narration,
+        use_llm=not no_llm,
+    )
+    print(json.dumps(meta, indent=2))
 
 
 @app.command(name="select-hooks")
@@ -137,20 +182,24 @@ def select_hooks_cmd(
 
     words = json.loads(Path(words_json).read_text(encoding="utf-8"))
     out_dir = Path(report_dir) if report_dir else Path(words_json).resolve().parent
-    selected, meta = select_hook_clips(
-        words=words,
-        clip_count=clip_count,
-        min_dur=min_dur,
-        max_dur=max_dur,
-        hook_mode=hook_mode,
-        hook_hint=hook_hint,
-        manual_start=start,
-        manual_end=end,
-        video_path=Path(video_in) if video_in else None,
-        report_dir=out_dir,
-        video_label=Path(video_in).name if video_in else Path(words_json).stem,
-        use_llm=not no_llm,
-    )
+    try:
+        selected, meta = select_hook_clips(
+            words=words,
+            clip_count=clip_count,
+            min_dur=min_dur,
+            max_dur=max_dur,
+            hook_mode=hook_mode,
+            hook_hint=hook_hint,
+            manual_start=start,
+            manual_end=end,
+            video_path=Path(video_in) if video_in else None,
+            report_dir=out_dir,
+            video_label=Path(video_in).name if video_in else Path(words_json).stem,
+            use_llm=not no_llm,
+        )
+    except ValueError as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(code=2)
     if explain:
         print(format_explain_summary(selected, meta.get("providers_used") or [], Path(meta["analysis_report_json"]) if meta.get("analysis_report_json") else None))
     print(json.dumps({"meta": meta, "clips": [dc_asdict(c) for c in selected]}, indent=2))
@@ -200,6 +249,8 @@ def render_clip_cmd(
     smart_crop: bool = typer.Option(False, "--smart-crop", help="Legacy alias for --framing auto"),
     subject_pop: bool = typer.Option(False, "--subject-pop", help="Enable optional MediaPipe subject brightness pop"),
     plain_4_5: bool = typer.Option(False, "--plain-4-5", help="Export plain 1080x1350 4:5 (blur=off, title=off)"),
+    render_preset: str = typer.Option("default", "--preset", help="Layout preset: default | plain_4_5 | clean_reels | clean_4_5"),
+    caption_preset: str = typer.Option("karaoke_pop", "--caption-preset", help="Caption preset: karaoke_pop | clean_bold"),
     smear_echo: bool = typer.Option(False, "--smear-echo", help="Enable horizontal echo ghosts during smear"),
     highlight_unit: str = typer.Option("syllable", "--highlight-unit", help="Emphasis highlight unit: syllable | word"),
     glow_spread_scale: float = typer.Option(1.0, "--glow-spread-scale", help="Glow spread multiplier"),
@@ -219,6 +270,9 @@ def render_clip_cmd(
     from dataclasses import replace as dc_replace
     from openclip_engine.clipping.clip_renderer import render_polished_clip
     from openclip_engine.clipping.config_styles import (
+        BOLD_CHUNK_CAPTIONS,
+        CLEAN_4_5_LAYOUT,
+        CLEAN_REELS_LAYOUT,
         DEFAULT_LAYOUT,
         DEFAULT_SFX_CONFIG,
         KARAOKE_POP,
@@ -231,16 +285,27 @@ def render_clip_cmd(
     eff_end = clip_end
     hook_sentence: Optional[str] = None
 
+    if (clip_start is None) != (clip_end is None):
+        typer.echo("Error: Both --start and --end must be provided together (or omit both for auto hook selection).", err=True)
+        raise typer.Exit(code=2)
+    if clip_start is not None and clip_end is not None and not (0.0 <= clip_start < clip_end):
+        typer.echo(f"Error: Invalid range --start {clip_start} --end {clip_end}: require 0 <= start < end.", err=True)
+        raise typer.Exit(code=2)
+
     if clip_start is None and words:
-        selected, hmeta = select_hook_clips(
-            words=words,
-            clip_count=1,
-            hook_mode=hook_mode,
-            hook_hint=hook_hint,
-            video_path=Path(video_in),
-            report_dir=Path(out_path).resolve().parent,
-            video_label=Path(video_in).name,
-        )
+        try:
+            selected, hmeta = select_hook_clips(
+                words=words,
+                clip_count=1,
+                hook_mode=hook_mode,
+                hook_hint=hook_hint,
+                video_path=Path(video_in),
+                report_dir=Path(out_path).resolve().parent,
+                video_label=Path(video_in).name,
+            )
+        except ValueError as exc:
+            typer.echo(f"Error: {exc}", err=True)
+            raise typer.Exit(code=2)
         if selected:
             eff_start = selected[0].refined_start if selected[0].refined_start is not None else selected[0].start
             eff_end = selected[0].refined_end if selected[0].refined_end is not None else selected[0].end
@@ -248,10 +313,18 @@ def render_clip_cmd(
             if explain:
                 print(format_explain_summary(selected, hmeta.get("providers_used") or [], Path(hmeta["analysis_report_json"]) if hmeta.get("analysis_report_json") else None))
 
-    base_layout = PLAIN_4_5_LAYOUT if plain_4_5 else DEFAULT_LAYOUT
+    preset_key = (render_preset or "default").strip().lower()
+    if plain_4_5 or preset_key == "plain_4_5":
+        base_layout = PLAIN_4_5_LAYOUT
+    elif preset_key == "clean_reels":
+        base_layout = CLEAN_REELS_LAYOUT
+    elif preset_key == "clean_4_5":
+        base_layout = CLEAN_4_5_LAYOUT
+    else:
+        base_layout = DEFAULT_LAYOUT
     layout = dc_replace(
         base_layout,
-        video_aspect=video_aspect,
+        video_aspect=base_layout.video_aspect if preset_key in ("clean_reels", "clean_4_5") else video_aspect,
         fit_mode=fit_mode,
         framing_mode="ref" if framing_ref else framing,
         framing_ref_path=framing_ref,
@@ -260,16 +333,20 @@ def render_clip_cmd(
         subjects_json_path=subjects_json,
         smart_crop=smart_crop,
         subject_pop=subject_pop,
-        quality=quality,
+        quality=base_layout.quality if preset_key in ("clean_reels", "clean_4_5") and quality == "balanced" else quality,
     )
-    cap_style = dc_replace(
-        KARAOKE_POP,
-        smear_echo=smear_echo,
-        highlight_unit=highlight_unit,
-        glow_spread_scale=glow_spread_scale,
-        glow_alpha_scale=glow_alpha_scale,
-        shadow_scale=shadow_scale,
-    )
+    cap_key = (caption_preset or "karaoke_pop").strip().lower()
+    if cap_key in ("clean_bold", "bold_chunk", "bold"):
+        cap_style = BOLD_CHUNK_CAPTIONS
+    else:
+        cap_style = dc_replace(
+            KARAOKE_POP,
+            smear_echo=smear_echo,
+            highlight_unit=highlight_unit,
+            glow_spread_scale=glow_spread_scale,
+            glow_alpha_scale=glow_alpha_scale,
+            shadow_scale=shadow_scale,
+        )
     sfx_cfg = dc_replace(
         DEFAULT_SFX_CONFIG,
         mode=sfx_mode,

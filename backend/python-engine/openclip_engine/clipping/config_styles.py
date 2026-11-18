@@ -83,9 +83,31 @@ class LayoutStyle:
     audio_bitrate: str = "192k"
     hwaccel_decode: bool = False     # Step 0 proved CPU decode + VT encode is faster than hwaccel VT decode
 
+    # Broadcast framing, cut hygiene, audio mastering & color metadata
+    edge_logo_margin_left_pct: float = 0.0   # exclude top-left corner badge/logo when >0 (e.g. 0.155)
+    edge_logo_margin_top_pct: float = 0.14   # top band where corner logo lives
+    max_upscale: float = 0.0                 # >0 caps upscale ratio (e.g. 1.55) to prevent soft over-zoom
+    center_wide_strips: bool = True          # always vertically center wide strips (never bottom-align)
+    never_black_bars: bool = True            # auto-blur bg whenever any shot has out_h < win_h (never pad black)
+    consistent_wide_layout: bool = False     # harmonize wide-strip height across multi-shot wide clips
+    trim_opening_stray_frames: bool = True   # drop 1-6 stray frames before an immediate cut at t~0
+    audio_loudnorm_enabled: bool = False     # two-pass linear loudnorm to audio_target_lufs / audio_target_tp_db
+    audio_target_lufs: float = -14.0
+    audio_target_tp_db: float = -1.0
+    audio_target_lra: float = 11.0
+    audio_highpass_hz: float = 0.0           # e.g. 80.0 Hz high-pass
+    audio_dialogue_eq: bool = False          # gentle 197/393 Hz drone cut + 2.8 kHz speech clarity
+    audio_sample_rate: int = 48000           # 48 kHz stereo AAC
+    audio_fade_out_ms: float = 0.0           # e.g. 250.0 ms smooth tail fade-out
+    exact_av_sync: bool = True               # trim/pad audio to exact video duration (no tail click/overhang)
+    bt709_tags: bool = True                  # tag H.264 High profile + BT.709 color metadata
+    output_fps_cap: float = 0.0              # >0 caps high-fps sources (e.g. 60->30fps for fast live encodes)
+
     def resolved_window_dims(self) -> Tuple[int, int, int]:
         """Returns (win_w, win_h, win_top) honoring video_aspect and blur_enabled."""
         if not self.blur_enabled and self.canvas_w == 1080 and self.canvas_h == 1350:
+            return (self.canvas_w, self.canvas_h, 0)
+        if self.window_top == 0 and self.window_h == self.canvas_h and self.window_w == self.canvas_w:
             return (self.canvas_w, self.canvas_h, 0)
         if self.video_aspect == "3:4":
             win_w = self.canvas_w
@@ -106,6 +128,99 @@ PLAIN_4_5_LAYOUT = LayoutStyle(
     window_top=0,
     blur_enabled=False,
     title_enabled=False,
+)
+
+CLEAN_REELS_LAYOUT = LayoutStyle(
+    canvas_w=1080,
+    canvas_h=1920,
+    video_aspect="9:16",
+    window_w=1080,
+    window_h=1920,
+    window_top=0,
+    fit_mode="cover",
+    blur_enabled=True,
+    title_enabled=False,
+    captions_enabled=True,
+    grade_enabled=False,
+    framing_mode="auto",
+    edge_logo_margin_left_pct=0.155,
+    max_upscale=1.55,
+    center_wide_strips=True,
+    never_black_bars=True,
+    consistent_wide_layout=True,
+    trim_opening_stray_frames=True,
+    audio_loudnorm_enabled=True,
+    audio_target_lufs=-14.0,
+    audio_target_tp_db=-1.0,
+    audio_highpass_hz=80.0,
+    audio_dialogue_eq=True,
+    audio_sample_rate=48000,
+    audio_fade_out_ms=250.0,
+    exact_av_sync=True,
+    bt709_tags=True,
+    quality="max",
+)
+
+CLEAN_4_5_LAYOUT = LayoutStyle(
+    canvas_w=1080,
+    canvas_h=1350,
+    video_aspect="4:5",
+    window_w=1080,
+    window_h=1350,
+    window_top=0,
+    fit_mode="cover",
+    blur_enabled=True,
+    title_enabled=False,
+    captions_enabled=True,
+    grade_enabled=False,
+    framing_mode="auto",
+    edge_logo_margin_left_pct=0.155,
+    max_upscale=1.55,
+    center_wide_strips=True,
+    never_black_bars=True,
+    consistent_wide_layout=True,
+    trim_opening_stray_frames=True,
+    audio_loudnorm_enabled=True,
+    audio_target_lufs=-14.0,
+    audio_target_tp_db=-1.0,
+    audio_highpass_hz=80.0,
+    audio_dialogue_eq=True,
+    audio_sample_rate=48000,
+    audio_fade_out_ms=250.0,
+    exact_av_sync=True,
+    bt709_tags=True,
+    quality="max",
+)
+
+LIVE_HORIZONTAL_BLUR_LAYOUT = LayoutStyle(
+    canvas_w=1080,
+    canvas_h=1920,
+    video_aspect="16:9",
+    window_w=1080,
+    window_h=608,                # Full crisp 16:9 horizontal stream in middle (1080x608)
+    window_top=656,              # Vertically centered: (1920 - 608) // 2 = 656
+    fit_mode="contain",          # Never crop horizontal livestream edges; overlay cleanly over zoomed blurred BG
+    blur_enabled=True,
+    bg_scale_div=8,
+    bg_blur_sigma=5.5,
+    bg_brightness=-0.12,
+    bg_saturation=1.12,
+    grade_enabled=False,         # Skip signalstats pass for max speed
+    framing_mode="off",          # Skip Vision crop detection (full horizontal video shown)
+    title_enabled=False,
+    captions_enabled=True,
+    trim_opening_stray_frames=False,
+    audio_loudnorm_enabled=True,
+    audio_target_lufs=-14.0,
+    audio_target_tp_db=-1.0,
+    audio_highpass_hz=80.0,
+    audio_dialogue_eq=False,
+    audio_sample_rate=48000,
+    audio_fade_out_ms=250.0,
+    exact_av_sync=True,
+    bt709_tags=True,
+    output_fps_cap=30.0,         # Cap 60fps gaming streams to 30fps -> 2x faster encodes
+    quality="fast",              # VideoToolbox 8M hardware encode (~1.5s/clip)
 )
 
 
@@ -212,8 +327,77 @@ class CaptionStyle:
     band_height_pct: float = 0.34           # backward-compat alias for legacy tooling
     sprite_cache_dir: str = str(Path.home() / ".cache" / "openclip" / "sprites")
 
+    # Broadcast 2-4 word chunked bold sans-serif mode ("single_word" | "phrase")
+    chunk_mode: str = "single_word"
+    chunk_min_words: int = 2
+    chunk_max_words: int = 4
+    chunk_min_duration_s: float = 0.40
+    chunk_max_lines: int = 2
+    line_spacing_mult: float = 1.14
+    stroke_width_1080: int = 0
+    stroke_color: Tuple[int, int, int] = (0, 0, 0)
+    active_word_color: str = "yellow"
+    normalize_casing: bool = False
+    smear_enabled: bool = True
+
 
 KARAOKE_POP = CaptionStyle()
+
+BOLD_CHUNK_CAPTIONS = CaptionStyle(
+    font_size_pct=0.098,                    # ~106px at W=1080 -> exact ~75px cap height on Montserrat ExtraBold
+    max_word_width_pct=0.84,                # <= 85% of frame width
+    anchor_x_pct=0.50,                      # horizontally centered
+    center_y_pct=0.675,                     # 67.5% down frame (clear of faces & bottom 20% UI)
+    strip_height_font_mult=4.2,             # generous 2-line + outline + shadow strip (~445px at 1080w)
+    font_paths=(
+        "/Library/Fonts/Montserrat/static/Montserrat-ExtraBold.ttf",
+        str(Path.home() / "Library" / "Fonts" / "Inter-Black.otf"),
+        "/Library/Fonts/Montserrat/static/Montserrat-Black.ttf",
+        "/System/Library/Fonts/Supplemental/Arial Black.ttf",
+        "/System/Library/Fonts/Supplemental/Impact.ttf",
+    ),
+    palette={
+        "yellow": (255, 224, 0),            # high-contrast warm accent yellow for active word only
+        "white": (255, 255, 255),           # crisp pure white for inactive words
+        "cyan": (46, 230, 240),
+        "red": (255, 30, 30),
+        "green": (27, 255, 27),
+    },
+    normal_colors=("white",),
+    emphasis_window_colors=("yellow",),
+    emphasis_base_color="white",
+    shadow_enabled=True,
+    shadow_scale=0.85,
+    shadow_dilate_px=3,
+    ambient_shadow_sigma_1080=12.0,
+    ambient_shadow_alpha=0.30,
+    ambient_shadow_offset_y_1080=5.0,
+    ambient_shadow_gain=2.0,
+    shadow_offset_x_1080=0.0,
+    shadow_offset_y_1080=6.0,
+    shadow_blur_sigma=4.0,
+    shadow_alpha=0.75,
+    shadow_gain=1.8,
+    contact_shadow_offset_x_1080=0.0,
+    contact_shadow_offset_y_1080=2.0,
+    contact_shadow_sigma_1080=1.5,
+    contact_shadow_alpha=0.50,
+    glow_enabled=False,
+    smear_enabled=False,
+    chunk_mode="phrase",
+    chunk_min_words=2,
+    chunk_max_words=4,
+    chunk_min_duration_s=0.40,
+    chunk_max_lines=2,
+    line_spacing_mult=1.14,
+    stroke_width_1080=8,
+    stroke_color=(0, 0, 0),
+    active_word_color="yellow",
+    normalize_casing=True,
+    max_pause_hold_s=0.20,
+    min_display_frames=2,
+    min_window_frames=2,
+)
 
 
 @dataclass(frozen=True)

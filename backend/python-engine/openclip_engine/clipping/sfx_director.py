@@ -205,6 +205,49 @@ def ensure_sfx_index(
     return by_cat
 
 
+def detect_opening_stray_frames(
+    video_in: Path,
+    clip_start: float = 0.0,
+    fps: float = 30.0,
+    max_check_frames: int = 6,
+    threshold: float = 0.28,
+    ffmpeg_bin: str = "ffmpeg",
+) -> int:
+    """
+    Detects a stray 1..max_check_frames flash of a previous shot at the very start of a clip.
+    Returns the integer frame index k (1 <= k <= max_check_frames) of the opening shot's true
+    first frame, or 0 if frame 0 already belongs to the opening shot.
+    """
+    check_dur = max(0.30, (max_check_frames + 3) / max(1.0, fps))
+    cmd = [ffmpeg_bin, "-hide_banner", "-v", "info"]
+    if clip_start > 0.001:
+        cmd.extend(["-ss", f"{clip_start:.6f}"])
+    cmd.extend([
+        "-t", f"{check_dur:.4f}",
+        "-i", str(video_in),
+        "-an",
+        "-vf", f"scale=320:-2:flags=fast_bilinear,select='gt(scene,{threshold})',showinfo",
+        "-f", "null", "-",
+    ])
+    try:
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+    except Exception:
+        return 0
+
+    best_k = 0
+    for line in res.stderr.splitlines():
+        if "pts_time:" not in line:
+            continue
+        m = re.search(r"pts_time:([0-9.]+)", line)
+        if not m:
+            continue
+        t = float(m.group(1))
+        k = int(round(t * fps))
+        if 1 <= k <= max_check_frames:
+            best_k = k
+    return best_k
+
+
 def detect_scene_cuts(
     video_in: Path,
     clip_start: float = 0.0,
@@ -216,9 +259,9 @@ def detect_scene_cuts(
     """Detects clip-relative scene cut timestamps (`select='gt(scene,0.4)'`, >= 0.5 s apart)."""
     cmd = [ffmpeg_bin, "-hide_banner", "-v", "info"]
     if clip_start > 0.001:
-        cmd.extend(["-ss", f"{clip_start:.3f}"])
+        cmd.extend(["-ss", f"{clip_start:.6f}"])
     if duration is not None and duration > 0:
-        cmd.extend(["-t", f"{duration:.3f}"])
+        cmd.extend(["-t", f"{duration:.6f}"])
     cmd.extend([
         "-i", str(video_in),
         "-an",
@@ -241,7 +284,7 @@ def detect_scene_cuts(
         if t < 0.25:
             continue
         if not cuts or (t - cuts[-1]) >= min_gap_s:
-            cuts.append(round(t, 4))
+            cuts.append(round(t, 6))
     return cuts
 
 

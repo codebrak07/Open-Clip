@@ -181,12 +181,45 @@ def split_syllables(word: str) -> List[str]:
     return chunks
 
 
-def clean_word_text(raw: str) -> str:
+def clean_word_text(raw: str, normalize_casing: bool = False, is_sentence_start: bool = False) -> str:
     """Keep transcript casing and ? ! ' - ; strip zero-width chars and trailing . , ; :"""
     w = re.sub(r"[\u200b\u200c\u200d\ufeff\u2060]+", "", raw).strip()
     if not w:
         return ""
     w = w.strip('"\u201c\u201d\u2018\u2019()[]')
+    if normalize_casing:
+        # Remove stray "---" / "--" / "..." truncation markers and collapse repeated punctuation
+        w = re.sub(r"-{2,}", "", w)
+        w = re.sub(r"\.{2,}", "", w)
+        w = re.sub(r"\?{2,}", "?", w)
+        w = re.sub(r"!{2,}", "!", w)
+        w = w.replace("?!?", "?!")
+        w = re.sub(r"[.,;:]+$", "", w)
+        w = re.sub(r"^[.,;:]+", "", w)
+        # Collapse 3+ consecutive identical letters from stretched yells ("hereee" -> "here", "Nooo" -> "No")
+        w = re.sub(r"([a-zA-Z])\1{2,}", r"\1", w)
+        if not w:
+            return ""
+        # Sentence case; allow ALL CAPS only for deliberate shouted emphasis (e.g. "WHAT?!")
+        letters = re.sub(r"[^a-zA-Z]+", "", w)
+        is_deliberate_caps = (
+            len(letters) >= 3
+            and letters.isupper()
+            and ("?!" in w or w.endswith("!"))
+            and letters in {"WHAT", "STOP", "WAIT", "RUN", "NO"}
+        )
+        if not is_deliberate_caps:
+            low = w.lower()
+            if low in {"i", "i'm", "i'll", "i've", "i'd"}:
+                w = "I" + low[1:]
+            elif is_sentence_start:
+                w = low[0].upper() + low[1:]
+            elif low == "t" or re.fullmatch(r"t[?!,]*", low):
+                w = "T" + low[1:]
+            else:
+                w = low
+        return w
+
     w = re.sub(r"[.,;:]+$", "", w)
     w = re.sub(r"^[.,;:]+", "", w)
     return w
@@ -264,9 +297,18 @@ def build_render_events(
     sync_s = style.caption_sync_offset_ms / 1000.0
 
     cleaned_words: List[Dict[str, Any]] = []
+    next_sent_start = True
     for item in words:
-        raw_text = item.get("word") if "word" in item else item.get("text", "")
-        text = clean_word_text(str(raw_text))
+        raw_text = str(item.get("word") if "word" in item else item.get("text", "")).strip()
+        if not raw_text:
+            continue
+        raw_ends_sentence = bool(re.search(r"[.?!\u2026][\"'\u201d\u2019)\]]*$", raw_text))
+        raw_ends_clause = raw_ends_sentence or bool(re.search(r"[,;:][\"'\u201d\u2019)\]]*$", raw_text))
+        text = clean_word_text(
+            raw_text,
+            normalize_casing=style.normalize_casing,
+            is_sentence_start=next_sent_start,
+        )
         if not text:
             continue
         src_start = float(item["start"])
@@ -274,6 +316,7 @@ def build_render_events(
 
         # Skip any word whose start is before clip_start (no stray smeared frame at 0.00s)
         if src_start < clip_start - 1e-6:
+            next_sent_start = raw_ends_sentence
             continue
 
         rel_start = (src_start - clip_start) + sync_s
@@ -286,7 +329,14 @@ def build_render_events(
 
         rel_start = max(0.0, rel_start)
         rel_end = max(rel_start + frame_dur, rel_end)
-        cleaned_words.append({"word": text, "start": rel_start, "end": rel_end})
+        cleaned_words.append({
+            "word": text,
+            "start": rel_start,
+            "end": rel_end,
+            "ends_sentence": raw_ends_sentence,
+            "ends_clause": raw_ends_clause,
+        })
+        next_sent_start = raw_ends_sentence
 
     if not cleaned_words:
         return []
@@ -294,14 +344,14 @@ def build_render_events(
     cleaned_words.sort(key=lambda w: w["start"])
 
     n_words = len(cleaned_words)
-    spans: List[Tuple[float, float, str]] = []
+    spans: List[Tuple[float, float, str, bool, bool]] = []
     for i, w in enumerate(cleaned_words):
         st = w["start"]
         en = w["end"]
 
         if spans and st < spans[-1][1]:
-            prev_st, _, prev_w = spans[-1]
-            spans[-1] = (prev_st, max(prev_st + frame_dur, st), prev_w)
+            prev_st, _, prev_w, prev_es, prev_ec = spans[-1]
+            spans[-1] = (prev_st, max(prev_st + frame_dur, st), prev_w, prev_es, prev_ec)
 
         if i + 1 < n_words:
             nxt_st = cleaned_words[i + 1]["start"]
@@ -320,12 +370,81 @@ def build_render_events(
                 hold_end = min(hold_end, clip_end - clip_start)
 
         if hold_end > st + 1e-6:
-            spans.append((st, hold_end, w["word"]))
+            spans.append((st, hold_end, w["word"], bool(w.get("ends_sentence")), bool(w.get("ends_clause"))))
+
+    # Phrase-chunked mode (2-4 words at a time, >= 0.4s per chunk where pace allows, active word highlighted)
+    if style.chunk_mode == "phrase":
+        min_w = max(1, style.chunk_min_words)
+        max_w = max(min_w, style.chunk_max_words)
+        min_chunk_dur = max(0.15, style.chunk_min_duration_s)
+
+        # Split into natural sentences/clauses first, then subdivide into balanced 2-4 word chunks (never 4+1 orphans!)
+        clauses: List[List[Tuple[float, float, str, bool, bool]]] = []
+        cur_cl: List[Tuple[float, float, str, bool, bool]] = []
+        for sp in spans:
+            if cur_cl and (sp[0] - cur_cl[-1][1]) > 0.35:
+                clauses.append(cur_cl)
+                cur_cl = []
+            cur_cl.append(sp)
+            if sp[3] or (sp[4] and len(cur_cl) >= min_w):
+                clauses.append(cur_cl)
+                cur_cl = []
+        if cur_cl:
+            clauses.append(cur_cl)
+
+        groups: List[List[Tuple[float, float, str, bool, bool]]] = []
+        for cl in clauses:
+            n_cl = len(cl)
+            if n_cl <= max_w:
+                groups.append(cl)
+            else:
+                # Balanced split into chunks of size 2..max_w (e.g. 5 -> 2+3, 6 -> 3+3, 7 -> 4+3, 9 -> 3+3+3)
+                n_chunks = int(math.ceil(n_cl / float(max_w)))
+                base = n_cl // n_chunks
+                rem = n_cl % n_chunks
+                pos = 0
+                for ci in range(n_chunks):
+                    sz = base + (1 if ci < rem else 0)
+                    groups.append(cl[pos : pos + sz])
+                    pos += sz
+
+        # Merge any 1-word orphan or sub-min_chunk_dur group into a neighbor (staying <= max_w + 1)
+        merged: List[List[Tuple[float, float, str, bool, bool]]] = []
+        for grp in groups:
+            g_dur = grp[-1][1] - grp[0][0]
+            if merged and (len(grp) < min_w or g_dur < min_chunk_dur) and len(merged[-1]) + len(grp) <= max_w:
+                merged[-1].extend(grp)
+            elif merged and len(grp) == 1 and len(merged[-1]) == max_w:
+                # Rebalance 4 + 1 -> 3 + 2 so no orphan word flickers alone
+                moved = merged[-1].pop()
+                merged.append([moved, grp[0]])
+            else:
+                merged.append(grp)
+
+        events_ph: List[RenderEvent] = []
+        active_col = style.active_word_color
+        w_cursor = 0
+        for grp in merged:
+            chunk_words = [s[2] for s in grp]
+            phrase_str = " ".join(chunk_words)
+            for local_i, (st, en, _, _, _) in enumerate(grp):
+                events_ph.append(RenderEvent(
+                    word_index=w_cursor,
+                    word=phrase_str,
+                    chunks=chunk_words,
+                    window_index=local_i,
+                    main_color_name=active_col,
+                    start=st,
+                    end=en,
+                    is_emphasis=True,
+                ))
+                w_cursor += 1
+        return events_ph
 
     events: List[RenderEvent] = []
     prev_main_color: Optional[str] = None
 
-    for w_idx, (st, en, word) in enumerate(spans):
+    for w_idx, (st, en, word, _, _) in enumerate(spans):
         is_emph, chunks = classify_word_chunks(word, style)
         word_dur = en - st
 
@@ -794,6 +913,135 @@ def compute_caption_strip_geometry(
     return strip_h, strip_y, caption_center_y
 
 
+def _wrap_phrase_words_into_lines(
+    words_list: Sequence[str],
+    font: Any,
+    meas: ImageDraw.ImageDraw,
+    max_w: int,
+    max_lines: int = 2,
+) -> List[List[Tuple[int, str]]]:
+    """Wraps indexed words [(idx, word), ...] into 1..max_lines balanced lines fitting within max_w."""
+    indexed = list(enumerate(words_list))
+    if not indexed:
+        return []
+    full_txt = " ".join(words_list)
+    if meas.textlength(full_txt, font=font) <= max_w or max_lines <= 1 or len(indexed) == 1:
+        return [indexed]
+
+    # Pick balanced 2-line split minimizing max(line1_w, line2_w)
+    best_split = 1
+    best_cost = float("inf")
+    for k in range(1, len(indexed)):
+        l1 = " ".join(w for _, w in indexed[:k])
+        l2 = " ".join(w for _, w in indexed[k:])
+        w1 = meas.textlength(l1, font=font)
+        w2 = meas.textlength(l2, font=font)
+        overflow = max(0.0, w1 - max_w) + max(0.0, w2 - max_w)
+        cost = overflow * 100.0 + max(w1, w2) + 0.25 * abs(w1 - w2)
+        if cost < best_cost:
+            best_cost = cost
+            best_split = k
+    return [indexed[:best_split], indexed[best_split:]]
+
+
+def _render_phrase_base(
+    ev: RenderEvent,
+    width: int,
+    band_h: int,
+    style: CaptionStyle,
+    local_center_y: Optional[float] = None,
+) -> Tuple[np.ndarray, int, int, int, int, int]:
+    """
+    Renders a broadcast-grade 2-4 word chunk sprite (max 2 lines, <=85% width):
+      - Heavy sans-serif (Montserrat ExtraBold / Inter Black), cap height ~75px at 1080w
+      - Soft drop shadow
+      - ~8px opaque black outline around every word (guarantees >=4.5:1 contrast over any bg)
+      - White fill on inactive words, single yellow accent on active word ONLY
+      - Zero neon glow, zero blur-in flicker
+    """
+    scale = width / 1080.0
+    base_font_size = max(20, int(round(style.font_size_pct * width)))
+    stroke_w = max(2, int(round(style.stroke_width_1080 * scale)))
+    max_w = int(round(style.max_word_width_pct * width))
+    meas = _get_meas_draw()
+
+    words_list = ev.chunks if ev.chunks else ev.word.split()
+    font_size = base_font_size
+    font = _load_font(font_size, style.font_paths)
+    lines = _wrap_phrase_words_into_lines(words_list, font, meas, max_w - stroke_w * 2, style.chunk_max_lines)
+
+    # Shrink font cleanly if any line still exceeds max_w
+    for _ in range(10):
+        widest = max(meas.textlength(" ".join(w for _, w in ln), font=font) + stroke_w * 2 for ln in lines)
+        if widest <= max_w or font_size <= 24:
+            break
+        font_size = max(24, int(math.floor(font_size * (max_w / widest) * 0.98)))
+        font = _load_font(font_size, style.font_paths)
+        lines = _wrap_phrase_words_into_lines(words_list, font, meas, max_w - stroke_w * 2, style.chunk_max_lines)
+
+    ref_bb = meas.textbbox((0, 0), "Hg", font=font)
+    glyph_h = max(1, int(round(ref_bb[3] - ref_bb[1])))
+    line_step = int(round(glyph_h * style.line_spacing_mult))
+    total_h = glyph_h + (len(lines) - 1) * line_step
+    cy_target = (band_h / 2.0) if local_center_y is None else local_center_y
+    top_y = int(round(cy_target - total_h / 2.0 - ref_bb[1]))
+    anchor_x = int(round(style.anchor_x_pct * width))
+
+    white_rgb = style.palette.get(style.emphasis_base_color, (255, 255, 255))
+    active_rgb = style.palette.get(ev.main_color_name, (255, 224, 0))
+    stroke_rgba = (*style.stroke_color, 255)
+
+    # Compute exact word positions across 1-2 lines
+    space_w = meas.textlength(" ", font=font)
+    placements: List[Tuple[int, str, int, int]] = []  # (word_idx, txt, x, y)
+    for li, ln in enumerate(lines):
+        line_txt = " ".join(w for _, w in ln)
+        line_w = meas.textlength(line_txt, font=font)
+        cur_x = anchor_x - line_w / 2.0
+        ly = top_y + li * line_step
+        for wi, wtxt in ln:
+            placements.append((wi, wtxt, int(round(cur_x)), ly))
+            cur_x += meas.textlength(wtxt, font=font) + space_w
+
+    # Draw shadow layer first (soft dark silhouette shifted down slightly)
+    full_img = Image.new("RGBA", (width, band_h), (0, 0, 0, 0))
+    if style.shadow_enabled and style.shadow_scale > 0:
+        sh_mask = Image.new("L", (width, band_h), 0)
+        sh_draw = ImageDraw.Draw(sh_mask)
+        sh_dx = int(round(style.shadow_offset_x_1080 * scale))
+        sh_dy = int(round(style.shadow_offset_y_1080 * scale))
+        for _, wtxt, wx, wy in placements:
+            sh_draw.text(
+                (wx + sh_dx, wy + sh_dy),
+                wtxt,
+                font=font,
+                fill=255,
+                stroke_width=stroke_w,
+                stroke_fill=255,
+            )
+        sh_arr = _blur_mask_2d(np.array(sh_mask, dtype=np.uint8), max(2.0, style.shadow_blur_sigma * scale))
+        sh_alpha = np.clip(sh_arr.astype(np.float32) * (style.shadow_alpha * style.shadow_scale), 0, 255).astype(np.uint8)
+        sh_rgba = _make_colored_layer(style.shadow_color, sh_alpha)
+        full_img = Image.fromarray(sh_rgba, mode="RGBA")
+
+    # Draw crisp opaque black outline + white/yellow fill on top
+    fg_img = Image.new("RGBA", (width, band_h), (0, 0, 0, 0))
+    fg_draw = ImageDraw.Draw(fg_img)
+    for wi, wtxt, wx, wy in placements:
+        fill_rgb = active_rgb if (ev.window_index is not None and wi == ev.window_index) else white_rgb
+        fg_draw.text(
+            (wx, wy),
+            wtxt,
+            font=font,
+            fill=(*fill_rgb, 255),
+            stroke_width=stroke_w,
+            stroke_fill=stroke_rgba,
+        )
+
+    out_arr = _alpha_over(np.array(full_img, dtype=np.uint8), np.array(fg_img, dtype=np.uint8))
+    return out_arr, 0, band_h, 0, width, anchor_x
+
+
 def _render_sharp_base(
     ev: RenderEvent,
     width: int,
@@ -802,13 +1050,11 @@ def _render_sharp_base(
     local_center_y: Optional[float] = None,
 ) -> Tuple[np.ndarray, int, int, int, int, int]:
     """
-    Renders sharp (smear_level=0) RGBA band sprite using tight ROI rendering:
-      1. Drop shadow (black, alpha 0.7, offset (+3,+4)*(W/1080), sigma 1.5)
-      2. Wide glow (word's own pure color, sigma ~9px, alpha 0.65, normal alpha-over)
-      3. Tight glow (word's own pure color, sigma ~3px, alpha 0.90, normal alpha-over)
-      4. Crisp Times New Roman Regular glyphs (no stroke, no box)
-    Returns (full_band_arr, ry0, ry1, rx0, rx1, word_center_x).
+    Renders sharp (smear_level=0) RGBA band sprite using tight ROI rendering.
+    Dispatches to `_render_phrase_base` when `style.chunk_mode == "phrase"`.
     """
+    if style.chunk_mode == "phrase":
+        return _render_phrase_base(ev, width, band_h, style, local_center_y)
     scale = width / 1080.0
     base_font_size = max(20, int(round(style.font_size_pct * width)))
     font = _load_font(base_font_size, style.font_paths)
@@ -929,10 +1175,12 @@ def render_event_sprite(
 # ─────────────────────── Sprite Factory (Memory + Disk Cache + ffconcat) ───────────────────────
 def _style_fingerprint(style: CaptionStyle) -> str:
     payload = (
-        f"v3|{style.font_size_pct:.4f}|{style.anchor_x_pct:.4f}|{style.glow_enabled}|"
+        f"v4|{style.chunk_mode}|{style.font_size_pct:.4f}|{style.anchor_x_pct:.4f}|{style.glow_enabled}|"
         f"{style.glow_spread_scale:.3f}|{style.glow_alpha_scale:.3f}|{style.shadow_enabled}|{style.shadow_scale:.3f}|"
         f"{style.glow_dilate_px}|{style.halo_glow_sigma_1080}|{style.wide_glow_sigma_1080}|{style.tight_glow_sigma_1080}|"
-        f"{style.smear_phase1_sigma_x_1080}|{style.smear_phase1_scale_x}|{style.smear_echo}|{style.highlight_unit}"
+        f"{style.smear_enabled}|{style.smear_phase1_sigma_x_1080}|{style.smear_phase1_scale_x}|{style.smear_echo}|"
+        f"{style.highlight_unit}|{style.stroke_width_1080}|{style.active_word_color}|{style.chunk_max_lines}|"
+        f"{style.font_paths[0] if style.font_paths else ''}"
     )
     return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:10]
 
@@ -1030,9 +1278,10 @@ def build_caption_ffconcat(
     hits = 0
     misses = 0
 
+    smear_levels = (2, 1, 0) if style.smear_enabled else (0,)
     for bk, ev in base_jobs.items():
         missing_smears: List[int] = []
-        for sm in (2, 1, 0):
+        for sm in smear_levels:
             ck = _sprite_cache_key(ev, sm, canvas_w, strip_h, local_cy, style_fp)
             png_path = cache_dir / f"{ck}.png"
             needed_paths[(bk[0], bk[1], bk[2], sm)] = png_path
@@ -1090,17 +1339,20 @@ def build_caption_ffconcat(
             continue
 
         bk = (ev.word, ev.window_index, ev.main_color_name)
-        p_sm2 = needed_paths[(bk[0], bk[1], bk[2], 2)]
-        p_sm1 = needed_paths[(bk[0], bk[1], bk[2], 1)]
         p_sh0 = needed_paths[(bk[0], bk[1], bk[2], 0)]
-
-        for fi in range(f_start, f_end):
-            rel = fi - f_start
-            if rel < p1_frames:
-                frame_paths[fi] = p_sm2
-            elif rel < p1_frames + p2_frames:
-                frame_paths[fi] = p_sm1
-            else:
+        if style.smear_enabled:
+            p_sm2 = needed_paths[(bk[0], bk[1], bk[2], 2)]
+            p_sm1 = needed_paths[(bk[0], bk[1], bk[2], 1)]
+            for fi in range(f_start, f_end):
+                rel = fi - f_start
+                if rel < p1_frames:
+                    frame_paths[fi] = p_sm2
+                elif rel < p1_frames + p2_frames:
+                    frame_paths[fi] = p_sm1
+                else:
+                    frame_paths[fi] = p_sh0
+        else:
+            for fi in range(f_start, f_end):
                 frame_paths[fi] = p_sh0
         cursor_f = f_end
 

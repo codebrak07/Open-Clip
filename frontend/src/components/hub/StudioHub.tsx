@@ -18,9 +18,11 @@ interface VideoMetadata {
   thumbnail: string;
   view_count: number;
   video_id: string;
+  is_live?: boolean;
 }
 
 type IngestionState = 'idle' | 'probing' | 'loaded' | 'processing' | 'done' | 'error';
+type LiveCaptureMode = 'live_and_behind' | 'live' | 'behind';
 
 export const StudioHub: React.FC<StudioHubProps> = ({
   onUploadClick,
@@ -34,6 +36,8 @@ export const StudioHub: React.FC<StudioHubProps> = ({
   const [aiProvider, setAiProvider] = useState<string>('nvidia');
   const [targetClipCount, setTargetClipCount] = useState<number>(5);
   const [youtubeUrl, setYoutubeUrl] = useState<string>('');
+  const [liveMode, setLiveMode] = useState<LiveCaptureMode>('live_and_behind');
+  const [dvrBehindSec, setDvrBehindSec] = useState<number>(900);
 
   // Video ingestion & completion states
   const [ingestionState, setIngestionState] = useState<IngestionState>('idle');
@@ -42,6 +46,16 @@ export const StudioHub: React.FC<StudioHubProps> = ({
   const [videoMeta, setVideoMeta] = useState<VideoMetadata | null>(null);
   const [createdJobId, setCreatedJobId] = useState<string | null>(null);
   const [extractedClips, setExtractedClips] = useState<ClipData[]>([]);
+  const [expandedSeoId, setExpandedSeoId] = useState<string | null>(null);
+  const [copiedKey, setCopiedKey] = useState<string | null>(null);
+  const [aiHookIntro, setAiHookIntro] = useState<boolean>(true);
+  const [narratorVoice, setNarratorVoice] = useState<string>('en-US-ChristopherNeural');
+
+  const handleCopySeo = (key: string, text: string) => {
+    navigator.clipboard?.writeText(text).catch(() => {});
+    setCopiedKey(key);
+    setTimeout(() => setCopiedKey(null), 1500);
+  };
 
   const aspectRatios = [
     { id: '9:16', label: '9:16 Vertical', desc: 'TikTok, Reels, Shorts' },
@@ -93,6 +107,7 @@ export const StudioHub: React.FC<StudioHubProps> = ({
             thumbnail: probeData.metadata.thumbnail || meta.thumbnail,
             view_count: probeData.metadata.view_count || meta.view_count,
             video_id: probeData.metadata.video_id || meta.video_id,
+            is_live: Boolean(probeData.metadata.is_live),
           };
         }
       }
@@ -100,12 +115,20 @@ export const StudioHub: React.FC<StudioHubProps> = ({
       setVideoMeta(meta);
       setIngestionState('loaded');
       setProgressPercent(45);
-      setStatusMessage('● Video Loaded · Demuxing high-speed 720p streams & extracting 16kHz audio...');
+      setStatusMessage(
+        meta.is_live
+          ? '● LIVE Stream Detected · Cutting live edge + DVR rewind clips & transcribing speech...'
+          : '● Video Loaded · Demuxing high-speed 1080p streams & extracting 16kHz audio...'
+      );
 
       // Step 2: High-speed import & viral clip generation via Python
       setIngestionState('processing');
       setProgressPercent(70);
-      setStatusMessage('⚡ Analyzing virality retention hooks & speech alignment...');
+      setStatusMessage(
+        meta.is_live
+          ? '⚡ Capturing live & behind-live DVR segments + generating captions...'
+          : '⚡ Analyzing virality retention hooks & speech alignment...'
+      );
 
       const importRes = await fetch(`${API_BASE_URL}/api/jobs/youtube/import`, {
         method: 'POST',
@@ -116,6 +139,10 @@ export const StudioHub: React.FC<StudioHubProps> = ({
           aspectRatio: selectedRatio,
           captionStyle: captionStyle,
           clipCount: targetClipCount,
+          liveMode,
+          dvrBehindSec,
+          aiHookIntro,
+          narratorVoice,
         }),
       });
 
@@ -127,10 +154,17 @@ export const StudioHub: React.FC<StudioHubProps> = ({
           start_time: c.start_time ?? (idx * 20),
           end_time: c.end_time ?? (idx * 20 + 15),
           score: c.score ?? 90,
-          title: c.title || `Clip ${idx + 1}`,
+          title: c.yt_title || c.title || `Clip ${idx + 1}`,
           hook_rationale: c.hook_rationale || 'High-retention hook detected by AI Director.',
           video_url: c.video_url,
           subtitles_url: c.subtitles_url,
+          yt_title: c.yt_title || c.seo?.yt_title || c.title,
+          description: c.description || c.seo?.description || '',
+          tags: c.tags || c.seo?.tags || [],
+          hashtags: c.hashtags || c.seo?.hashtags || [],
+          hook_narration: c.hook_narration || c.seo?.hook_narration || '',
+          intro_duration: c.intro_duration || c.seo?.intro_duration || 0,
+          seo: c.seo || null,
         }));
 
         setCreatedJobId(jobId);
@@ -326,7 +360,7 @@ export const StudioHub: React.FC<StudioHubProps> = ({
                 marginBottom: '8px',
               }}
             >
-              IMPORT YOUTUBE URL (yt-dlp)
+              IMPORT YOUTUBE URL OR LIVE STREAM (yt-dlp)
             </label>
             <div style={{ display: 'flex', gap: '8px' }}>
               <input
@@ -334,7 +368,7 @@ export const StudioHub: React.FC<StudioHubProps> = ({
                 value={youtubeUrl}
                 onChange={(e) => setYoutubeUrl(e.target.value)}
                 onPaste={handlePaste}
-                placeholder="https://www.youtube.com/watch?v=..."
+                placeholder="https://www.youtube.com/watch?v=... or /live/..."
                 style={{
                   flex: 1,
                   backgroundColor: '#F9F9F8',
@@ -367,6 +401,80 @@ export const StudioHub: React.FC<StudioHubProps> = ({
                 {ingestionState === 'probing' || ingestionState === 'processing' ? 'Loading...' : 'Import'}
               </button>
             </div>
+
+            {/* Live + Behind (DVR) controls when a live URL or live stream is active */}
+            {(youtubeUrl.toLowerCase().includes('/live/') || videoMeta?.is_live) && (
+              <div
+                style={{
+                  marginTop: '10px',
+                  padding: '10px 12px',
+                  borderRadius: '8px',
+                  backgroundColor: '#FFF7F5',
+                  border: '1px solid #F3D1C8',
+                  display: 'flex',
+                  flexWrap: 'wrap',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  gap: '8px',
+                  fontSize: '12px',
+                }}
+              >
+                <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontWeight: 600, color: '#B42318' }}>
+                  <span>● LIVE DVR</span>
+                  {([
+                    { id: 'live_and_behind', label: 'Live + Behind' },
+                    { id: 'live', label: 'Live Edge' },
+                    { id: 'behind', label: 'Behind Only' },
+                  ] as const).map((m) => (
+                    <button
+                      key={m.id}
+                      type="button"
+                      onClick={() => setLiveMode(m.id)}
+                      style={{
+                        padding: '4px 8px',
+                        borderRadius: '6px',
+                        border: liveMode === m.id ? '1px solid #B42318' : '1px solid #E5D4CE',
+                        backgroundColor: liveMode === m.id ? '#B42318' : '#FFFFFF',
+                        color: liveMode === m.id ? '#FFFFFF' : '#4A4945',
+                        fontSize: '11px',
+                        fontWeight: 600,
+                        cursor: 'pointer',
+                      }}
+                    >
+                      {m.label}
+                    </button>
+                  ))}
+                </div>
+                {liveMode !== 'live' && (
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '4px', color: '#62615D' }}>
+                    <span style={{ fontSize: '11px' }}>Lookback:</span>
+                    {[
+                      { sec: 300, label: '5m' },
+                      { sec: 900, label: '15m' },
+                      { sec: 1800, label: '30m' },
+                      { sec: 3600, label: '60m' },
+                    ].map((w) => (
+                      <button
+                        key={w.sec}
+                        type="button"
+                        onClick={() => setDvrBehindSec(w.sec)}
+                        style={{
+                          padding: '3px 7px',
+                          borderRadius: '5px',
+                          border: dvrBehindSec === w.sec ? '1px solid #171717' : '1px solid #DFDDD5',
+                          backgroundColor: dvrBehindSec === w.sec ? '#171717' : '#FFFFFF',
+                          color: dvrBehindSec === w.sec ? '#FFFFFF' : '#4A4945',
+                          fontSize: '11px',
+                          cursor: 'pointer',
+                        }}
+                      >
+                        {w.label}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
           </div>
 
           {/* Drag & Drop File Zone */}
@@ -626,53 +734,205 @@ export const StudioHub: React.FC<StudioHubProps> = ({
                     EXTRACTED VIRAL CLIPS ({extractedClips.length})
                   </div>
 
-                  {extractedClips.map((c, i) => (
-                    <div
-                      key={c.id || i}
-                      style={{
-                        display: 'flex',
-                        alignItems: 'center',
-                        justifyContent: 'space-between',
-                        padding: '10px 12px',
-                        borderRadius: '6px',
-                        backgroundColor: '#FFFFFF',
-                        border: '1px solid #DFDDD5',
-                      }}
-                    >
-                      <div style={{ minWidth: 0, flex: 1 }}>
-                        <div style={{ fontSize: '12px', fontWeight: 700, color: '#171717' }}>
-                          {c.title}
-                        </div>
-                        <div
-                          style={{
-                            fontSize: '10px',
-                            fontFamily: "'JetBrains Mono', monospace",
-                            color: '#898781',
-                            marginTop: '2px',
-                          }}
-                        >
-                          {formatDuration(c.start_time)} - {formatDuration(c.end_time)} · {c.hook_rationale?.slice(0, 48)}...
-                        </div>
-                      </div>
+                  {extractedClips.map((c, i) => {
+                    const cid = c.id || String(i);
+                    const ytTitle = c.seo?.yt_title || c.yt_title || c.title;
+                    const desc = c.seo?.description || c.description || '';
+                    const tags = c.seo?.tags || c.tags || [];
+                    const hashtags = c.seo?.hashtags || c.hashtags || [];
+                    const hasSeo = Boolean(desc || tags.length > 0 || hashtags.length > 0);
+                    const isOpen = expandedSeoId === cid || (expandedSeoId === null && i === 0);
 
+                    return (
                       <div
+                        key={cid}
                         style={{
-                          marginLeft: '12px',
-                          padding: '3px 8px',
-                          borderRadius: '999px',
-                          backgroundColor: '#FFFBEB',
-                          border: '1px solid #FDE68A',
-                          color: '#B45309',
-                          fontSize: '11px',
-                          fontWeight: 700,
-                          fontFamily: "'JetBrains Mono', monospace",
-                          whiteSpace: 'nowrap',
+                          padding: '10px 12px',
+                          borderRadius: '8px',
+                          backgroundColor: '#FFFFFF',
+                          border: '1px solid #DFDDD5',
+                          display: 'flex',
+                          flexDirection: 'column',
+                          gap: '8px',
                         }}
                       >
-                        {c.score} Score
+                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px' }}>
+                          <div style={{ minWidth: 0, flex: 1 }}>
+                            <div style={{ fontSize: '12px', fontWeight: 700, color: '#171717' }}>
+                              {ytTitle}
+                            </div>
+                            <div
+                              style={{
+                                fontSize: '10px',
+                                fontFamily: "'JetBrains Mono', monospace",
+                                color: '#898781',
+                                marginTop: '2px',
+                              }}
+                            >
+                              {formatDuration(c.start_time)} - {formatDuration(c.end_time)} · {c.hook_rationale?.slice(0, 56)}
+                            </div>
+                            {(c.hook_narration || c.seo?.hook_narration) && (
+                              <div
+                                style={{
+                                  marginTop: '4px',
+                                  fontSize: '10px',
+                                  color: '#92400E',
+                                  backgroundColor: '#FFFBEB',
+                                  border: '1px solid #FDE68A',
+                                  borderRadius: '5px',
+                                  padding: '3px 7px',
+                                  display: 'inline-block',
+                                }}
+                              >
+                                🎙️ AI Intro ({Number(c.intro_duration || c.seo?.intro_duration || 3).toFixed(1)}s): “{c.hook_narration || c.seo?.hook_narration}”
+                              </div>
+                            )}
+                          </div>
+
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                            {hasSeo && (
+                              <button
+                                type="button"
+                                onClick={() => setExpandedSeoId(isOpen ? '__none__' : cid)}
+                                style={{
+                                  padding: '3px 8px',
+                                  borderRadius: '6px',
+                                  backgroundColor: '#F5F4F0',
+                                  border: '1px solid #DFDDD5',
+                                  color: '#171717',
+                                  fontSize: '10px',
+                                  fontWeight: 600,
+                                  cursor: 'pointer',
+                                  whiteSpace: 'nowrap',
+                                }}
+                              >
+                                {isOpen ? '▾ YT SEO' : '▸ YT SEO'}
+                              </button>
+                            )}
+                            <div
+                              style={{
+                                padding: '3px 8px',
+                                borderRadius: '999px',
+                                backgroundColor: '#FFFBEB',
+                                border: '1px solid #FDE68A',
+                                color: '#B45309',
+                                fontSize: '11px',
+                                fontWeight: 700,
+                                fontFamily: "'JetBrains Mono', monospace",
+                                whiteSpace: 'nowrap',
+                              }}
+                            >
+                              {c.score} Score
+                            </div>
+                          </div>
+                        </div>
+
+                        {hasSeo && isOpen && (
+                          <div
+                            style={{
+                              padding: '10px',
+                              borderRadius: '6px',
+                              backgroundColor: '#F9F9F7',
+                              border: '1px solid #E7E5DF',
+                              display: 'flex',
+                              flexDirection: 'column',
+                              gap: '8px',
+                              fontSize: '11px',
+                            }}
+                          >
+                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                              <span style={{ fontSize: '10px', fontFamily: "'JetBrains Mono', monospace", fontWeight: 700, color: '#62615D' }}>
+                                YOUTUBE SEO PACKAGE
+                              </span>
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  handleCopySeo(
+                                    `${cid}_all`,
+                                    `TITLE:\n${ytTitle}\n\nDESCRIPTION:\n${desc}\n\nHASHTAGS:\n${hashtags.join(' ')}\n\nTAGS:\n${tags.join(', ')}`
+                                  )
+                                }
+                                style={{
+                                  padding: '3px 8px',
+                                  borderRadius: '5px',
+                                  border: '1px solid #171717',
+                                  backgroundColor: '#171717',
+                                  color: '#FFFFFF',
+                                  fontSize: '10px',
+                                  fontWeight: 600,
+                                  cursor: 'pointer',
+                                }}
+                              >
+                                {copiedKey === `${cid}_all` ? '✓ Copied All' : 'Copy All SEO'}
+                              </button>
+                            </div>
+
+                            {/* YT Title */}
+                            <div>
+                              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '10px', color: '#898781', marginBottom: '2px' }}>
+                                <span>TITLE</span>
+                                <button type="button" onClick={() => handleCopySeo(`${cid}_t`, ytTitle)} style={{ background: 'none', border: 'none', color: '#B45309', fontWeight: 600, fontSize: '10px', cursor: 'pointer' }}>
+                                  {copiedKey === `${cid}_t` ? '✓ Copied' : 'Copy'}
+                                </button>
+                              </div>
+                              <div style={{ color: '#171717', fontWeight: 600 }}>{ytTitle}</div>
+                            </div>
+
+                            {/* Description */}
+                            {desc && (
+                              <div>
+                                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '10px', color: '#898781', marginBottom: '2px' }}>
+                                  <span>DESCRIPTION</span>
+                                  <button type="button" onClick={() => handleCopySeo(`${cid}_d`, desc)} style={{ background: 'none', border: 'none', color: '#B45309', fontWeight: 600, fontSize: '10px', cursor: 'pointer' }}>
+                                    {copiedKey === `${cid}_d` ? '✓ Copied' : 'Copy'}
+                                  </button>
+                                </div>
+                                <div style={{ color: '#4A4945', whiteSpace: 'pre-wrap', lineHeight: 1.4 }}>{desc}</div>
+                              </div>
+                            )}
+
+                            {/* Hashtags */}
+                            {hashtags.length > 0 && (
+                              <div>
+                                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '10px', color: '#898781', marginBottom: '4px' }}>
+                                  <span>HASHTAGS</span>
+                                  <button type="button" onClick={() => handleCopySeo(`${cid}_h`, hashtags.join(' '))} style={{ background: 'none', border: 'none', color: '#B45309', fontWeight: 600, fontSize: '10px', cursor: 'pointer' }}>
+                                    {copiedKey === `${cid}_h` ? '✓ Copied' : 'Copy'}
+                                  </button>
+                                </div>
+                                <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px' }}>
+                                  {hashtags.map((h, hi) => (
+                                    <span key={hi} style={{ padding: '2px 7px', borderRadius: '999px', backgroundColor: '#EEF2FF', color: '#3730A3', fontSize: '10px', fontWeight: 600 }}>
+                                      {h}
+                                    </span>
+                                  ))}
+                                </div>
+                              </div>
+                            )}
+
+                            {/* SEO Tags */}
+                            {tags.length > 0 && (
+                              <div>
+                                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '10px', color: '#898781', marginBottom: '4px' }}>
+                                  <span>SEO TAGS ({tags.length})</span>
+                                  <button type="button" onClick={() => handleCopySeo(`${cid}_g`, tags.join(', '))} style={{ background: 'none', border: 'none', color: '#B45309', fontWeight: 600, fontSize: '10px', cursor: 'pointer' }}>
+                                    {copiedKey === `${cid}_g` ? '✓ Copied' : 'Copy'}
+                                  </button>
+                                </div>
+                                <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px' }}>
+                                  {tags.map((t, ti) => (
+                                    <span key={ti} style={{ padding: '2px 6px', borderRadius: '4px', backgroundColor: '#FFFFFF', border: '1px solid #DFDDD5', color: '#4A4945', fontSize: '10px' }}>
+                                      {t}
+                                    </span>
+                                  ))}
+                                </div>
+                              </div>
+                            )}
+                          </div>
+                        )}
                       </div>
-                    </div>
-                  ))}
+                    );
+                  })}
 
                   {/* Primary CTA Button: Open in Director Workspace */}
                   <div style={{ display: 'flex', gap: '10px', marginTop: '8px' }}>
@@ -903,6 +1163,69 @@ export const StudioHub: React.FC<StudioHubProps> = ({
                 />
               </div>
             </div>
+          </div>
+
+          {/* Cold-Open Preview + Male AI Narrator Hook Intro */}
+          <div>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '8px' }}>
+              <label
+                style={{
+                  fontSize: '11px',
+                  fontFamily: "'JetBrains Mono', monospace",
+                  color: '#898781',
+                }}
+              >
+                COLD-OPEN PREVIEW + AI MALE HOOK VOICE
+              </label>
+              <button
+                type="button"
+                onClick={() => setAiHookIntro(!aiHookIntro)}
+                style={{
+                  padding: '4px 10px',
+                  borderRadius: '999px',
+                  fontSize: '11px',
+                  fontWeight: 700,
+                  cursor: 'pointer',
+                  backgroundColor: aiHookIntro ? '#171717' : '#F3F2EE',
+                  color: aiHookIntro ? '#FFFFFF' : '#62615D',
+                  border: aiHookIntro ? '1px solid #171717' : '1px solid #DFDDD5',
+                }}
+              >
+                {aiHookIntro ? '● ON' : '○ OFF'}
+              </button>
+            </div>
+            <div style={{ fontSize: '11px', color: '#62615D', marginBottom: aiHookIntro ? '8px' : '0' }}>
+              Shows a peak preview flash first with a Male AI voiceover (“This is what happened when...”), then cuts right into the clip.
+            </div>
+            {aiHookIntro && (
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '8px' }}>
+                {[
+                  { id: 'en-US-ChristopherNeural', label: 'Christopher', desc: 'Deep Viral' },
+                  { id: 'en-US-GuyNeural', label: 'Guy', desc: 'Energetic' },
+                  { id: 'en-US-EricNeural', label: 'Eric', desc: 'Narrator' },
+                ].map((v) => (
+                  <button
+                    key={v.id}
+                    type="button"
+                    onClick={() => setNarratorVoice(v.id)}
+                    style={{
+                      padding: '8px 10px',
+                      borderRadius: '8px',
+                      fontSize: '11px',
+                      fontWeight: 600,
+                      cursor: 'pointer',
+                      textAlign: 'left',
+                      backgroundColor: narratorVoice === v.id ? 'rgba(201, 158, 53, 0.1)' : '#F9F9F8',
+                      color: narratorVoice === v.id ? '#A67C1E' : '#62615D',
+                      border: narratorVoice === v.id ? '1.5px solid #C99E35' : '1px solid #DFDDD5',
+                    }}
+                  >
+                    <div style={{ fontWeight: 700 }}>🎙️ {v.label}</div>
+                    <div style={{ fontSize: '10px', color: '#898781', fontWeight: 400 }}>{v.desc}</div>
+                  </button>
+                ))}
+              </div>
+            )}
           </div>
 
           {/* AI Reasoning Provider */}

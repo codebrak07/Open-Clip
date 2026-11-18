@@ -77,15 +77,17 @@ export class PythonEngineBridge {
       return res;
     } catch (e: any) {
       console.warn('[PythonEngineBridge] inspectYouTube error:', e.message);
-      const match = url.match(/(?:youtu\.be\/|youtube\.com\/(?:watch\?v=|shorts\/))([a-zA-Z0-9_-]{11})/);
+      const match = url.match(/(?:youtu\.be\/|youtube\.com\/(?:watch\?(?:[^#\s]*&)?v=|shorts\/|live\/|embed\/))([a-zA-Z0-9_-]{11})/);
       const videoId = match ? match[1] : 'video';
+      const isLive = /youtube\.com\/live\//i.test(url);
       return {
-        title: `YouTube Video (${videoId})`,
+        title: `YouTube ${isLive ? 'Live Stream' : 'Video'} (${videoId})`,
         uploader: 'YouTube Creator',
-        duration: 210,
+        duration: isLive ? 3600 : 210,
         thumbnail: `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`,
         view_count: 1420000,
         video_id: videoId,
+        is_live: isLive,
         status: 'loaded',
       };
     }
@@ -120,7 +122,11 @@ export class PythonEngineBridge {
     jobId: string,
     clipCount: number = 5,
     aspectRatio: string = '9:16',
-    captionStyle: string = 'Hormozi'
+    captionStyle: string = 'Hormozi',
+    liveMode: string = 'live_and_behind',
+    dvrBehindSec: number = 900,
+    aiHookIntro: boolean = true,
+    narratorVoice: string = 'en-US-ChristopherNeural'
   ): Promise<{
     metadata: any;
     clips: Array<{
@@ -129,6 +135,24 @@ export class PythonEngineBridge {
       start_time: number;
       end_time: number;
       title?: string;
+      yt_title?: string;
+      description?: string;
+      tags?: string[];
+      hashtags?: string[];
+      seo?: {
+        yt_title: string;
+        description: string;
+        tags: string[];
+        hashtags: string[];
+        hook_narration?: string;
+        intro_duration?: number;
+        preview_start?: number;
+      };
+      seo_path?: string | null;
+      hook_narration?: string;
+      intro_duration?: number;
+      preview_start?: number;
+      voice_backend?: string;
       score?: number;
       hook_sentence?: string;
       hook_rationale?: string;
@@ -150,6 +174,13 @@ export class PythonEngineBridge {
       aspectRatio,
       '--caption-style',
       captionStyle,
+      '--live-mode',
+      liveMode,
+      '--dvr-behind-sec',
+      String(dvrBehindSec),
+      aiHookIntro ? '--ai-hook-intro' : '--no-ai-hook-intro',
+      '--narrator-voice',
+      narratorVoice,
     ]);
     if (res && Array.isArray(res.clips) && res.clips.length > 0) {
       return res;
