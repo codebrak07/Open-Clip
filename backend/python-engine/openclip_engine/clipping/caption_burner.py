@@ -90,6 +90,11 @@ def fetch_youtube_captions(info: Dict[str, Any]) -> List[Dict[str, Any]]:
     except Exception:
         return []
 
+    _ZW_RE = re.compile(r"[\u200b\u200c\u200d\ufeff\u2060]+")
+
+    def _strip_zw(s: str) -> str:
+        return re.sub(r"\s+", " ", _ZW_RE.sub("", s)).strip()
+
     cues: List[Dict[str, Any]] = []
     for ev in payload.get("events", []):
         segs = ev.get("segs")
@@ -100,7 +105,7 @@ def fetch_youtube_captions(info: Dict[str, Any]) -> List[Dict[str, Any]]:
         if t_ms is None:
             continue
         raw_text = "".join(s.get("utf8", "") for s in segs)
-        clean = re.sub(r"\s+", " ", raw_text).strip()
+        clean = _strip_zw(raw_text)
         if not clean or clean in ("[Music]", "[Applause]", "[Laughter]"):
             continue
         start = t_ms / 1000.0
@@ -112,7 +117,7 @@ def fetch_youtube_captions(info: Dict[str, Any]) -> List[Dict[str, Any]]:
         if has_offsets:
             valid_segs = []
             for s in segs:
-                txt = re.sub(r"\s+", " ", s.get("utf8", "")).strip()
+                txt = _strip_zw(s.get("utf8", ""))
                 if not txt:
                     continue
                 off = int(s.get("tOffsetMs", 0))
@@ -127,7 +132,33 @@ def fetch_youtube_captions(info: Dict[str, Any]) -> List[Dict[str, Any]]:
         cues.append(cue_obj)
 
     cues.sort(key=lambda c: c["start"])
-    return cues
+
+    # Deduplicate overlapping animated YouTube CC events (e.g. MrBeast styled/karaoke CC tracks
+    # that emit the same line or growing prefix multiple times within <0.25s)
+    deduped: List[Dict[str, Any]] = []
+    for c in cues:
+        if deduped:
+            prev = deduped[-1]
+            cur_norm = c["text"].lower()
+            prev_norm = prev["text"].lower()
+            near_or_overlap = c["start"] < prev["end"] and (c["start"] - prev["start"]) < 1.2
+            if near_or_overlap:
+                if cur_norm == prev_norm:
+                    prev["end"] = max(prev["end"], c["end"])
+                    continue
+                if cur_norm.startswith(prev_norm) and len(cur_norm) > len(prev_norm):
+                    # Animated progressive reveal: replace prefix with fuller phrase
+                    prev["text"] = c["text"]
+                    prev["end"] = max(prev["end"], c["end"])
+                    if "words" in c:
+                        prev["words"] = c["words"]
+                    continue
+                if prev_norm.endswith(cur_norm):
+                    # Redundant tail echo from YouTube scrolling CC
+                    continue
+        deduped.append(c)
+
+    return deduped
 
 
 def slice_and_chunk_cues(
