@@ -277,6 +277,9 @@ class YtDlpClient:
                     aspect_ratio=aspect_ratio,
                     caption_style=caption_style,
                     ffmpeg_bin=ffmpeg_bin,
+                    raw_all_cues=all_cues,
+                    clip_start=float(start_sec),
+                    clip_end=float(end_sec),
                 )
 
                 transcript_text = " ".join(c["text"] for c in clip_cues)[:160]

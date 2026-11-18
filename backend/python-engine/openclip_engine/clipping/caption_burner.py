@@ -105,7 +105,26 @@ def fetch_youtube_captions(info: Dict[str, Any]) -> List[Dict[str, Any]]:
             continue
         start = t_ms / 1000.0
         end = (t_ms + max(500, d_ms)) / 1000.0
-        cues.append({"start": start, "end": end, "text": clean})
+
+        # Preserve per-word timestamps from YouTube json3 tOffsetMs when present
+        has_offsets = any("tOffsetMs" in s for s in segs)
+        words_timed: List[Dict[str, Any]] = []
+        if has_offsets:
+            valid_segs = []
+            for s in segs:
+                txt = re.sub(r"\s+", " ", s.get("utf8", "")).strip()
+                if not txt:
+                    continue
+                off = int(s.get("tOffsetMs", 0))
+                valid_segs.append((start + off / 1000.0, txt))
+            for idx, (ws, wt) in enumerate(valid_segs):
+                we = valid_segs[idx + 1][0] if idx + 1 < len(valid_segs) else end
+                words_timed.append({"start": ws, "end": max(ws + 0.08, we), "text": wt})
+
+        cue_obj: Dict[str, Any] = {"start": start, "end": end, "text": clean}
+        if words_timed:
+            cue_obj["words"] = words_timed
+        cues.append(cue_obj)
 
     cues.sort(key=lambda c: c["start"])
     return cues
@@ -461,12 +480,31 @@ def build_reframe_and_caption_clip(
     aspect_ratio: str = "9:16",
     caption_style: str = "Hormozi",
     ffmpeg_bin: str = "ffmpeg",
+    raw_all_cues: Optional[List[Dict[str, Any]]] = None,
+    clip_start: float = 0.0,
+    clip_end: Optional[float] = None,
 ) -> Path:
     """
     Produces a crisp 1080p reframed MP4 in the chosen aspect ratio with animated burnt-in captions.
-    Streams a compact 30fps RGBA caption band directly into FFmpeg stdin so animations
-    (including Kinetic one-word-one-color vertical motion-blur IN/OUT) render in a single fast pass.
+    Supports Hormozi, Kinetic (lime/cyan vertical blur), KaraokePop (1-word Times New Roman neon
+    glow + vertical Gaussian smear + syllable highlight), Minimalist, and Banner.
     """
+    style_check = (caption_style or "Hormozi").strip().lower()
+    if style_check in ("karaokepop", "karaoke", "karaoke pop", "karaoke-pop", "serif pop"):
+        from openclip_engine.clipping.karaoke_pop import build_karaoke_pop_clip
+
+        source_cues = raw_all_cues if raw_all_cues is not None else cues
+        eff_end = clip_end if clip_end is not None else _probe_duration(raw_clip_path, ffmpeg_bin)
+        return build_karaoke_pop_clip(
+            raw_clip_path=raw_clip_path,
+            final_clip_path=final_clip_path,
+            cues=source_cues,
+            clip_start=clip_start if raw_all_cues is not None else 0.0,
+            clip_end=eff_end if raw_all_cues is not None else _probe_duration(raw_clip_path, ffmpeg_bin),
+            aspect_ratio=aspect_ratio,
+            ffmpeg_bin=ffmpeg_bin,
+        )
+
     target_w, target_h = ASPECT_DIMS.get(aspect_ratio, (1080, 1920))
     is_vertical = target_h > target_w
     ratio_expr = f"{target_w}/{target_h}"

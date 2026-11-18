@@ -803,8 +803,9 @@ export const StudioHub: React.FC<StudioHubProps> = ({
             </label>
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px' }}>
               {[
-                { id: 'Hormozi', label: '🟡 Hormozi Amber', desc: 'Bold white + amber pop' },
-                { id: 'Kinetic', label: '🌈 Kinetic Lime/Cyan', desc: '1-word 1-color · vertical blur' },
+                { id: 'KaraokePop', label: '✨ Karaoke Pop', desc: '1-word Times Serif · neon glow + vertical smear' },
+                { id: 'Kinetic', label: '🌈 Kinetic Lime/Cyan', desc: '1-word 1-color · vertical blur in/out' },
+                { id: 'Hormozi', label: '🟡 Hormozi Amber', desc: 'Bold white + amber punchline' },
                 { id: 'Minimalist', label: '⚪ Minimalist', desc: 'Clean editorial fade' },
                 { id: 'Banner', label: '⬛ Subtitle Bar', desc: 'Dark pill container' },
               ].map((s) => (
@@ -818,6 +819,7 @@ export const StudioHub: React.FC<StudioHubProps> = ({
                     fontWeight: 600,
                     cursor: 'pointer',
                     textAlign: 'left',
+                    gridColumn: s.id === 'KaraokePop' ? 'span 2' : undefined,
                     backgroundColor: captionStyle === s.id ? 'rgba(201, 158, 53, 0.1)' : '#F9F9F8',
                     color: captionStyle === s.id ? '#171717' : '#62615D',
                     border: captionStyle === s.id ? '1.5px solid #C99E35' : '1px solid #DFDDD5',
