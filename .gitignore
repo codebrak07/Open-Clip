@@ -52,4 +52,5 @@ storage/
 **/.venv/
 __pycache__/
 **/__pycache__/
+tools/verify_output/
 artifacts_cache/

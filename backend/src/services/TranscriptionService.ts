@@ -24,6 +24,7 @@ export interface TranscriptSegment {
 export interface TranscriptionResult {
   text: string;
   segments: TranscriptSegment[];
+  words?: TranscriptWord[];
 }
 
 export class TranscriptionService {
@@ -45,6 +46,8 @@ export class TranscriptionService {
         form.append('file', fs.createReadStream(audioPath));
         form.append('model', 'whisper-large-v3');
         form.append('response_format', 'verbose_json');
+        form.append('timestamp_granularities[]', 'word');
+        form.append('timestamp_granularities[]', 'segment');
 
         const response = await axios.post(
           'https://api.groq.com/openai/v1/audio/transcriptions',
@@ -60,20 +63,33 @@ export class TranscriptionService {
         );
 
         const data = response.data;
-        const segments: TranscriptSegment[] = (data.segments || []).map((seg: any) => ({
-          text: seg.text,
-          start: seg.start,
-          end: seg.end,
-          words: (seg.words || []).map((w: any) => ({
+        const topLevelWords: TranscriptWord[] = (data.words || []).map((w: any) => ({
+          word: w.word,
+          start: w.start,
+          end: w.end,
+        }));
+
+        const segments: TranscriptSegment[] = (data.segments || []).map((seg: any) => {
+          const segWords: TranscriptWord[] = (seg.words || []).map((w: any) => ({
             word: w.word,
             start: w.start,
             end: w.end,
-          })),
-        }));
+          }));
+          const matchedWords = segWords.length > 0
+            ? segWords
+            : topLevelWords.filter((w) => w.start >= seg.start - 0.05 && w.end <= seg.end + 0.05);
+          return {
+            text: seg.text,
+            start: seg.start,
+            end: seg.end,
+            words: matchedWords,
+          };
+        });
 
         return {
           text: data.text || '',
           segments,
+          words: topLevelWords,
         };
       } catch (err: any) {
         console.warn(`[Groq Transcription Key Failed] key ending in ...${key.slice(-6)}: ${err.message}`);
@@ -82,7 +98,7 @@ export class TranscriptionService {
     }
 
     // If API keys fail or file is non-verbal, return empty transcript cleanly to trigger visual fallback mode
-    return { text: '', segments: [] };
+    return { text: '', segments: [], words: [] };
   }
 
 

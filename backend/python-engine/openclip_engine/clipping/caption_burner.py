@@ -490,7 +490,7 @@ def build_reframe_and_caption_clip(
     glow + vertical Gaussian smear + syllable highlight), Minimalist, and Banner.
     """
     style_check = (caption_style or "Hormozi").strip().lower()
-    if style_check in ("karaokepop", "karaoke", "karaoke pop", "karaoke-pop", "serif pop"):
+    if style_check in ("karaoke_pop", "karaokepop", "karaoke", "karaoke pop", "karaoke-pop", "serif pop"):
         from openclip_engine.clipping.karaoke_pop import build_karaoke_pop_clip
 
         source_cues = raw_all_cues if raw_all_cues is not None else cues

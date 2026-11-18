@@ -110,6 +110,31 @@ def extract_clips(
     )
     print(json.dumps(result))
 
+
+@app.command(name="caption")
+def caption_video(
+    video_in: str,
+    words_json: str,
+    out_path: str,
+    caption_style: str = typer.Option("karaoke_pop", "--caption-style", help="Caption preset: karaoke_pop, Hormozi, Kinetic, Minimalist, Banner"),
+    clip_start: float = typer.Option(0.0, "--clip-start", help="Clip start time in source seconds"),
+    smear_echo: bool = typer.Option(False, "--smear-echo", help="Enable horizontal echo ghosts during smear"),
+):
+    """Burns word-level captions onto a video file using karaoke_pop or another preset."""
+    from dataclasses import replace as dc_replace
+    from openclip_engine.clipping.karaoke_pop import KARAOKE_POP, render_captions
+    from openclip_engine.clipping.caption_burner import build_reframe_and_caption_clip
+
+    words = json.loads(Path(words_json).read_text(encoding="utf-8"))
+    style_norm = caption_style.strip().lower()
+    if style_norm in ("karaoke_pop", "karaokepop", "karaoke"):
+        st = dc_replace(KARAOKE_POP, smear_echo=smear_echo)
+        out = render_captions(video_in, words, out_path, style=st, clip_start=clip_start)
+    else:
+        cues = [{"start": float(w["start"]) - clip_start, "end": float(w["end"]) - clip_start, "text": w.get("word", w.get("text", ""))} for w in words]
+        out = build_reframe_and_caption_clip(Path(video_in), Path(out_path), cues, caption_style=caption_style)
+    print(json.dumps({"output": str(out), "style": caption_style}))
+
 @app.command()
 def transcribe(source: str):
     """Extracts 16kHz audio from source media and prepares for speech alignment."""
