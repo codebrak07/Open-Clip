@@ -1,105 +1,29 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import math
 import os
 import re
 import subprocess
-from dataclasses import dataclass, field
+import tempfile
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
+from openclip_engine.clipping.config_styles import CaptionStyle, KARAOKE_POP
 
-# Resolve bundled fallback font relative to repository root (assets/fonts/Tinos-Regular.ttf)
-_REPO_ROOT = Path(__file__).resolve().parents[4]
-_BUNDLED_TINOS = str(_REPO_ROOT / "assets" / "fonts" / "Tinos-Regular.ttf")
-_BUNDLED_LIBERATION = str(_REPO_ROOT / "assets" / "fonts" / "LiberationSerif-Regular.ttf")
-
-
-@dataclass(frozen=True)
-class CaptionStyle:
-    """Single source of truth for all Karaoke Pop geometry, palette, glow, shadow, smear, and timing values."""
-
-    # Font (Times New Roman Regular primary; bundled Tinos/Liberation Serif fallback; never bold)
-    font_paths: Tuple[str, ...] = (
-        "/System/Library/Fonts/Supplemental/Times New Roman.ttf",
-        _BUNDLED_TINOS,
-        _BUNDLED_LIBERATION,
-        "/System/Library/Fonts/Times.ttc",
-        "/Library/Fonts/Times New Roman.ttf",
-        "/usr/share/fonts/truetype/liberation/LiberationSerif-Regular.ttf",
-        "/usr/share/fonts/truetype/liberation2/LiberationSerif-Regular.ttf",
-    )
-    font_size_pct: float = 0.102        # 110px at 1080 wide
-    max_word_width_pct: float = 0.90    # shrink to fit if wider than 90% of W
-
-    # Geometry (relative to video W x H)
-    anchor_x_pct: float = 0.48          # horizontal center
-    center_y_pct: float = 0.54          # vertical center of the line box
-
-    # Palette (ONLY these 4 + white for emphasis base; no pink, lime, mint, orange)
-    palette: Dict[str, Tuple[int, int, int]] = field(default_factory=lambda: {
-        "yellow": (0xF5, 0xF0, 0x00),   # #F5F000
-        "cyan":   (0x2E, 0xE6, 0xF0),   # #2EE6F0
-        "red":    (0xFF, 0x1E, 0x1E),   # #FF1E1E
-        "green":  (0x1B, 0xFF, 0x1B),   # #1BFF1B
-        "white":  (0xFF, 0xFF, 0xFF),   # #FFFFFF (emphasis base only)
-    })
-    normal_colors: Tuple[str, ...] = ("yellow", "cyan", "red", "green")
-    emphasis_window_colors: Tuple[str, ...] = ("green", "yellow")
-    emphasis_base_color: str = "white"
-
-    # Layer 1: Drop shadow (bottom)
-    shadow_color: Tuple[int, int, int] = (0, 0, 0)
-    shadow_alpha: float = 0.70
-    shadow_offset_x_1080: float = 3.0
-    shadow_offset_y_1080: float = 4.0
-    shadow_blur_sigma: float = 1.5
-
-    # Layer 2: Outer glow (middle, same hue as glyph)
-    glow_sigma_1080: float = 6.0        # ~12px radius
-    glow_opacity: float = 0.60
-    glow_dilate_px: int = 5.5             # odd integer kernel size for pre-blur stem spread
-    glow_gain: float = 4.8              # compensates 2D blur attenuation on thin serif strokes so 4-12px halo sits at ~45-55%
-
-    # Entrance smear (horizontal-only Gaussian blur + scaleX, time-based in ms)
-    smear_phase1_ms: float = 33.0
-    smear_phase1_sigma_x_1080: float = 16.0
-    smear_phase1_scale_x: float = 1.12
-    smear_phase2_ms: float = 66.0
-    smear_phase2_sigma_x_1080: float = 5.0
-    smear_phase2_scale_x: float = 1.03
-
-    # Optional horizontal echo ghost copies during smear (default off)
-    smear_echo: bool = False
-    smear_echo_offsets_1080: Tuple[float, ...] = (8.0, 16.0, 24.0)
-    smear_echo_alpha: float = 0.35
-
-    # Emphasis word detection stoplist & syllable window rules
-    emphasis_stoplist: Tuple[str, ...] = (
-        "every", "everyone", "everything", "everybody",
-        "probably", "family", "different", "interesting", "camera",
-    )
-    acronym_min_len: int = 2
-    acronym_max_len: int = 5
-    emphasis_min_syllables: int = 3
-    min_window_frames: int = 2
-
-    # Timing & hold rules
-    max_pause_hold_s: float = 0.25      # bridge gaps <= 0.25s; hide at word.end + 0.25s for longer pauses
-    min_display_frames: int = 2
-    caption_sync_offset_ms: float = 0.0
-
-    # Deterministic color seed & encoding settings
-    color_seed: int = 1337
-    crf: int = 18
-    band_height_pct: float = 0.34       # overlay RGBA strip height centered at center_y_pct
-
-
-KARAOKE_POP = CaptionStyle()
+try:
+    import cv2  # type: ignore
+    _HAS_CV2 = True
+except Exception:
+    cv2 = None
+    _HAS_CV2 = False
 
 
 # ─────────────────────── Dictionary & Syllable Engine ───────────────────────
@@ -138,7 +62,6 @@ def _get_english_dictionary() -> set:
             try:
                 for line in p.read_text(encoding="utf-8", errors="ignore").splitlines():
                     w = line.strip()
-                    # Only include lowercase dictionary entries (excludes uppercase proper nouns/acronyms)
                     if w and w.islower() and w.isalpha():
                         words.add(w)
             except Exception:
@@ -152,7 +75,6 @@ def _is_english_word(word_lower: str) -> bool:
     d = _get_english_dictionary()
     if word_lower in d:
         return True
-    # Handle regular inflections (plurals / -ed / -ing) not always listed in /usr/share/dict/words
     if len(word_lower) > 3 and word_lower.endswith("s") and word_lower[:-1] in d:
         return True
     if len(word_lower) > 4 and word_lower.endswith("es") and word_lower[:-2] in d:
@@ -168,7 +90,6 @@ _DIGRAPHS = {"th", "ch", "sh", "ph", "wh", "ck", "ng"}
 
 
 def _tokenize_consonants(cluster: str) -> List[str]:
-    """Splits a consonant cluster into indivisible units while keeping th/ch/sh/ph/wh/ck/ng together."""
     units: List[str] = []
     i = 0
     n = len(cluster)
@@ -186,10 +107,9 @@ def split_syllables(word: str) -> List[str]:
     """
     Splits a word into spoken syllable chunks using vowel-group nuclei:
       - a, e, i, o, u, y count as vowels (leading 'y' before a vowel is treated as consonant).
-      - Silent final 'e' after a consonant is dropped from nuclei when another nucleus exists.
-      - Digraphs (th, ch, sh, ph, wh, ck, ng) stay together as one consonant unit.
-      - Boundary is placed BEFORE a single intervening consonant unit, or BETWEEN two consonant units.
-      - Trailing '?' or '!' is preserved on the final syllable.
+      - Silent final 'e' after a consonant is dropped when >= 2 nuclei exist.
+      - Digraphs (th, ch, sh, ph, wh, ck, ng) stay together.
+      - Boundary before a single intervening consonant unit, between two consonant units otherwise.
     """
     if not word:
         return []
@@ -209,12 +129,10 @@ def split_syllables(word: str) -> List[str]:
         ch = core[idx]
         if ch not in vowels:
             return False
-        # Initial 'y' followed by another vowel acts as a consonant (e.g. "your", "yes")
         if ch in ("y", "Y") and idx == 0 and len(core) > 1 and core[1] in set("aeiouAEIOU"):
             return False
         return True
 
-    # 1. Locate contiguous vowel-group nuclei [(start, end), ...]
     nuclei: List[Tuple[int, int]] = []
     i = 0
     n = len(core)
@@ -227,7 +145,6 @@ def split_syllables(word: str) -> List[str]:
         else:
             i += 1
 
-    # 2. Drop silent final 'e' (single 'e' at word end preceded by a consonant, if >= 2 nuclei)
     if (
         len(nuclei) >= 2
         and nuclei[-1][1] == n
@@ -241,7 +158,6 @@ def split_syllables(word: str) -> List[str]:
     if len(nuclei) <= 1:
         return [core + trailing]
 
-    # 3. Compute syllable boundaries between consecutive nuclei
     cut_points: List[int] = [0]
     for k in range(len(nuclei) - 1):
         prev_end = nuclei[k][1]
@@ -252,17 +168,13 @@ def split_syllables(word: str) -> List[str]:
         else:
             units = _tokenize_consonants(intervening)
             if len(units) == 1:
-                # Boundary BEFORE a single intervening consonant unit
                 cut_points.append(prev_end)
             else:
-                # Boundary BETWEEN consonants (after the first consonant unit)
                 cut_points.append(prev_end + len(units[0]))
     cut_points.append(n)
 
     chunks = [core[cut_points[j] : cut_points[j + 1]] for j in range(len(cut_points) - 1)]
-    chunks = [c for c in chunks if c]
-    if not chunks:
-        chunks = [core]
+    chunks = [c for c in chunks if c] or [core]
     if trailing:
         chunks[-1] += trailing
     return chunks
@@ -273,15 +185,13 @@ def clean_word_text(raw: str) -> str:
     w = re.sub(r"[\u200b\u200c\u200d\ufeff\u2060]+", "", raw).strip()
     if not w:
         return ""
-    # Strip surrounding quotes/parens if any
     w = w.strip('"\u201c\u201d\u2018\u2019()[]')
-    # Strip trailing . , ; : while preserving ? ! ' -
     w = re.sub(r"[.,;:]+$", "", w)
     w = re.sub(r"^[.,;:]+", "", w)
     return w
 
 
-def is_acronym(word: str, style: CaptionStyle) -> bool:
+def is_acronym(word: str, style: CaptionStyle = KARAOKE_POP) -> bool:
     core = re.sub(r"[?!'\-]+$", "", word)
     if not core.isalpha():
         return False
@@ -292,13 +202,7 @@ def is_acronym(word: str, style: CaptionStyle) -> bool:
     return not _is_english_word(core.lower())
 
 
-def classify_word_chunks(word: str, style: CaptionStyle) -> Tuple[bool, List[str]]:
-    """
-    Returns (is_emphasis, chunks):
-      - Acronym (2-5 uppercase non-dictionary letters): emphasis, split letter-by-letter.
-      - 3+ syllables and not in stoplist: emphasis, split by split_syllables(word).
-      - Otherwise: normal solid word.
-    """
+def classify_word_chunks(word: str, style: CaptionStyle = KARAOKE_POP) -> Tuple[bool, List[str]]:
     if is_acronym(word, style):
         trailing = ""
         core = word
@@ -327,9 +231,7 @@ def _pick_deterministic_color(
     word_index: int,
     seed: int,
 ) -> str:
-    allowed = [c for c in candidates if c != exclude]
-    if not allowed:
-        allowed = list(candidates)
+    allowed = [c for c in candidates if c != exclude] or list(candidates)
     digest = hashlib.sha256(f"{seed}:{word_index}".encode("utf-8")).digest()
     idx = int.from_bytes(digest[:4], "big") % len(allowed)
     return allowed[idx]
@@ -355,16 +257,11 @@ def build_render_events(
     clip_end: Optional[float] = None,
     style: CaptionStyle = KARAOKE_POP,
 ) -> List[RenderEvent]:
-    """
-    Applies clip-relative timing, sync offset, pause-hold bridging (<= 0.25s), clamping,
-    min 2-frame display, emphasis detection, syllable window splits, and deterministic colors.
-    """
     frame_dur = 1.0 / max(1.0, fps)
     min_word_dur = style.min_display_frames * frame_dur
     min_win_dur = style.min_window_frames * frame_dur
     sync_s = style.caption_sync_offset_ms / 1000.0
 
-    # 1. Filter words starting before clip_start, rebase to clip-relative time, clean text
     cleaned_words: List[Dict[str, Any]] = []
     for item in words:
         raw_text = item.get("word") if "word" in item else item.get("text", "")
@@ -395,9 +292,6 @@ def build_render_events(
 
     cleaned_words.sort(key=lambda w: w["start"])
 
-    # 2. Clamp overlapping timestamps and apply hold logic:
-    #    Show from word.start until next.start if gap <= max_pause_hold_s (0.25s),
-    #    else hide at word.end + max_pause_hold_s. Min display 2 frames, never overlapping next.
     n_words = len(cleaned_words)
     spans: List[Tuple[float, float, str]] = []
     for i, w in enumerate(cleaned_words):
@@ -405,7 +299,6 @@ def build_render_events(
         en = w["end"]
 
         if spans and st < spans[-1][1]:
-            # Clamp previous end if previous overlapped this start
             prev_st, _, prev_w = spans[-1]
             spans[-1] = (prev_st, max(prev_st + frame_dur, st), prev_w)
 
@@ -419,7 +312,6 @@ def build_render_events(
                 hold_end = nxt_st
             else:
                 hold_end = min(nxt_st, en + style.max_pause_hold_s)
-            # Enforce min display 2 frames without overlapping next word
             hold_end = min(nxt_st, max(hold_end, st + min_word_dur))
         else:
             hold_end = max(en, st + min_word_dur)
@@ -429,7 +321,6 @@ def build_render_events(
         if hold_end > st + 1e-6:
             spans.append((st, hold_end, w["word"]))
 
-    # 3. Assign colors (deterministic, no consecutive main-color repeats) & split emphasis windows
     events: List[RenderEvent] = []
     prev_main_color: Optional[str] = None
 
@@ -437,7 +328,6 @@ def build_render_events(
         is_emph, chunks = classify_word_chunks(word, style)
         word_dur = en - st
 
-        # Only split into syllable windows if word can hold chunks cleanly
         if is_emph and len(chunks) >= 2 and word_dur >= 2 * frame_dur:
             main_color = _pick_deterministic_color(
                 style.emphasis_window_colors,
@@ -447,14 +337,11 @@ def build_render_events(
             )
             prev_main_color = main_color
 
-            # Proportional to character count, enforcing min_window_frames per chunk when total duration allows
             n_ch = len(chunks)
             weights = [max(1, len(c)) for c in chunks]
             total_w = sum(weights)
-
             raw_durs = [word_dur * (wt / total_w) for wt in weights]
             if word_dur >= n_ch * min_win_dur:
-                # Floor each chunk to min_win_dur and redistribute excess proportionally
                 durs = [max(min_win_dur, d) for d in raw_durs]
                 excess = sum(durs) - word_dur
                 if excess > 1e-9:
@@ -501,22 +388,22 @@ def build_render_events(
     return events
 
 
-# ─────────────────────── Sprite Rendering & Horizontal Smear ───────────────────────
-import threading as _threading
+# ─────────────────────── Fast Gaussian / Dilation / Compositing Primitives ───────────────────────
+_FONT_TLS = threading.local()
+_SPRITE_MEM_CACHE: Dict[str, Path] = {}
+_SPRITE_LOCK = threading.Lock()
 
-_FONT_TLS = _threading.local()
 
-
-def _load_font(size: int, style: CaptionStyle) -> ImageFont.FreeTypeFont:
+def _load_font(size: int, font_paths: Sequence[str]) -> ImageFont.FreeTypeFont:
     cache = getattr(_FONT_TLS, "fonts", None)
     if cache is None:
         cache = {}
         _FONT_TLS.fonts = cache
-    key = (style.font_paths, size)
+    key = (tuple(font_paths), size)
     cached = cache.get(key)
     if cached is not None:
         return cached
-    for fp in style.font_paths:
+    for fp in font_paths:
         if os.path.exists(fp):
             try:
                 f = ImageFont.truetype(fp, size)
@@ -527,38 +414,120 @@ def _load_font(size: int, style: CaptionStyle) -> ImageFont.FreeTypeFont:
     return ImageFont.load_default()
 
 
-def _separable_max_filter(arr: np.ndarray, k: int) -> np.ndarray:
-    """
-    Exact 2D square MaxFilter(size=k) implemented as separable 1D-Y then 1D-X
-    vectorized NumPy max passes. Mathematically identical to ImageFilter.MaxFilter(k)
-    and ~100x faster on RGBA ROIs while releasing the Python GIL.
-    """
+def _get_meas_draw() -> ImageDraw.ImageDraw:
+    meas = getattr(_FONT_TLS, "meas", None)
+    if meas is None:
+        meas = ImageDraw.Draw(Image.new("RGBA", (1, 1), (0, 0, 0, 0)))
+        _FONT_TLS.meas = meas
+    return meas
+
+
+def _separable_max_filter_2d(mask_u8: np.ndarray, k: int) -> np.ndarray:
+    """Exact 2D square max filter on a 2D uint8 alpha mask via separable 1D Y then X."""
     if k < 3:
-        return arr
+        return mask_u8
     r = k // 2
-    h, w, c = arr.shape
-    # Vertical 1D max
-    pad_y = np.pad(arr, ((r, r), (0, 0), (0, 0)), mode="edge")
+    h, w = mask_u8.shape
+    pad_y = np.pad(mask_u8, ((r, r), (0, 0)), mode="edge")
     max_y = pad_y[:h].copy()
     for dy in range(1, k):
         np.maximum(max_y, pad_y[dy : dy + h], out=max_y)
-    # Horizontal 1D max
-    pad_x = np.pad(max_y, ((0, 0), (r, r), (0, 0)), mode="edge")
+    pad_x = np.pad(max_y, ((0, 0), (r, r)), mode="edge")
     max_xy = pad_x[:, :w].copy()
     for dx in range(1, k):
         np.maximum(max_xy, pad_x[:, dx : dx + w], out=max_xy)
     return max_xy
 
 
-def _horizontal_gaussian_blur_1d(arr: np.ndarray, sigma_x: float) -> np.ndarray:
+def _blur_mask_2d(mask_u8: np.ndarray, sigma: float) -> np.ndarray:
+    """Fast 2D Gaussian blur on a single-channel uint8 mask (cv2 if present, else Pillow)."""
+    if sigma <= 0.15:
+        return mask_u8
+    if _HAS_CV2:
+        k = max(3, int(round(sigma * 6)) | 1)
+        return cv2.GaussianBlur(mask_u8, (k, k), sigmaX=sigma, sigmaY=sigma, borderType=cv2.BORDER_CONSTANT)
+    return np.array(Image.fromarray(mask_u8, mode="L").filter(ImageFilter.GaussianBlur(radius=sigma)), dtype=np.uint8)
+
+
+def _alpha_over(dst: np.ndarray, src: np.ndarray) -> np.ndarray:
+    """Normal alpha-over composite (src over dst) in float32 premultiplied space -> uint8 RGBA."""
+    sa = src[:, :, 3:4].astype(np.float32) * (1.0 / 255.0)
+    da = dst[:, :, 3:4].astype(np.float32) * (1.0 / 255.0)
+    inv_sa = 1.0 - sa
+    out_a = sa + da * inv_sa
+    safe_a = np.where(out_a > 1e-6, out_a, 1.0)
+    out_rgb = (src[:, :, :3].astype(np.float32) * sa + dst[:, :, :3].astype(np.float32) * da * inv_sa) / safe_a
+    out = np.empty_like(dst)
+    out[:, :, :3] = np.clip(np.where(out_a > 1e-6, out_rgb, 0.0), 0, 255).astype(np.uint8)
+    out[:, :, 3:4] = np.clip(out_a * 255.0, 0, 255).astype(np.uint8)
+    return out
+
+
+def _make_colored_layer(rgb: Tuple[int, int, int], alpha_u8: np.ndarray) -> np.ndarray:
+    """Creates a pure saturated RGB RGBA array with the given uint8 alpha mask."""
+    h, w = alpha_u8.shape
+    layer = np.empty((h, w, 4), dtype=np.uint8)
+    layer[:, :, 0] = rgb[0]
+    layer[:, :, 1] = rgb[1]
+    layer[:, :, 2] = rgb[2]
+    layer[:, :, 3] = alpha_u8
+    return layer
+
+
+def build_two_layer_glow(
+    mask_u8: np.ndarray,
+    rgb: Tuple[int, int, int],
+    scale: float,
+    wide_sigma_1080: float,
+    wide_alpha: float,
+    wide_gain: float,
+    tight_sigma_1080: float,
+    tight_alpha: float,
+    tight_gain: float,
+    dilate_px: int = 5,
+) -> Tuple[np.ndarray, np.ndarray]:
     """
-    O(1) 3-pass horizontal cumsum Gaussian approximation (sigma_x, sigma_y=0) along axis=1
-    on premultiplied RGBA. ~40x faster than direct kernel convolution with identical Gaussian falloff.
+    Produces (wide_glow_rgba, tight_glow_rgba) in pure saturated `rgb` for normal alpha-over.
+      - Wide glow: glyph alpha blurred sigma ~9px, alpha 0.65
+      - Tight glow: glyph alpha blurred sigma ~3px, alpha 0.90
     """
+    dil_k = int(round(dilate_px * scale))
+    if dil_k >= 3:
+        if dil_k % 2 == 0:
+            dil_k += 1
+        wide_src = _separable_max_filter_2d(mask_u8, dil_k)
+    else:
+        wide_src = mask_u8
+
+    wide_blur = _blur_mask_2d(wide_src, wide_sigma_1080 * scale).astype(np.float32)
+    wide_a = np.clip(np.minimum(255.0, wide_blur * wide_gain) * wide_alpha, 0, 255).astype(np.uint8)
+
+    tight_blur = _blur_mask_2d(mask_u8, tight_sigma_1080 * scale).astype(np.float32)
+    tight_a = np.clip(np.minimum(255.0, tight_blur * tight_gain) * tight_alpha, 0, 255).astype(np.uint8)
+
+    return _make_colored_layer(rgb, wide_a), _make_colored_layer(rgb, tight_a)
+
+
+def horizontal_gaussian_blur_1d(arr: np.ndarray, sigma_x: float) -> np.ndarray:
+    """Horizontal-only Gaussian blur (sigma_x, sigma_y=0) on premultiplied RGBA."""
     if sigma_x <= 0.25:
         return arr
 
-    # Box width for 3-pass Gaussian approximation: sigma^2 = 3 * (w^2 - 1) / 12 => w = sqrt(4*sigma^2 + 1)
+    if _HAS_CV2:
+        f = arr.astype(np.float32)
+        a = f[:, :, 3:4] * (1.0 / 255.0)
+        premul = np.empty_like(f)
+        premul[:, :, :3] = f[:, :, :3] * a
+        premul[:, :, 3:4] = f[:, :, 3:4]
+        kx = max(3, int(round(sigma_x * 6)) | 1)
+        blurred = cv2.GaussianBlur(premul, (kx, 1), sigmaX=sigma_x, sigmaY=0, borderType=cv2.BORDER_CONSTANT)
+        oa = blurred[:, :, 3:4]
+        safe_a = np.where(oa > 1.0, oa * (1.0 / 255.0), 1.0)
+        out = np.empty_like(blurred)
+        out[:, :, :3] = np.where(oa > 1.0, blurred[:, :, :3] / safe_a, 0.0)
+        out[:, :, 3:4] = oa
+        return np.clip(out, 0, 255).astype(np.uint8)
+
     box_w = max(3, int(round(math.sqrt(4.0 * sigma_x * sigma_x + 1.0))))
     if box_w % 2 == 0:
         box_w += 1
@@ -566,56 +535,129 @@ def _horizontal_gaussian_blur_1d(arr: np.ndarray, sigma_x: float) -> np.ndarray:
     inv_w = 1.0 / box_w
 
     f = arr.astype(np.float32)
-    alpha = f[:, :, 3:4] / 255.0
+    alpha = f[:, :, 3:4] * (1.0 / 255.0)
     cur = np.empty_like(f)
     cur[:, :, :3] = f[:, :, :3] * alpha
     cur[:, :, 3:4] = f[:, :, 3:4]
 
-    h, w, _ = cur.shape
+    _, w, _ = cur.shape
     for _ in range(3):
         padded = np.pad(cur, ((0, 0), (r + 1, r), (0, 0)), mode="constant")
         csum = np.cumsum(padded, axis=1)
         cur = (csum[:, box_w : box_w + w, :] - csum[:, :w, :]) * inv_w
 
     out_alpha = cur[:, :, 3:4]
-    safe_a = np.where(out_alpha > 1.0, out_alpha / 255.0, 1.0)
+    safe_a = np.where(out_alpha > 1.0, out_alpha * (1.0 / 255.0), 1.0)
     res = np.empty_like(cur)
     res[:, :, :3] = np.where(out_alpha > 1.0, cur[:, :, :3] / safe_a, 0.0)
     res[:, :, 3:4] = out_alpha
     return np.clip(res, 0, 255).astype(np.uint8)
 
 
-def _scale_x_about_center(arr: np.ndarray, scale_x: float, center_x: int) -> np.ndarray:
+def scale_x_about_center(arr: np.ndarray, scale_x: float, center_x: int) -> np.ndarray:
     """Applies horizontal scaleX around center_x while keeping Y untouched."""
     if abs(scale_x - 1.0) < 1e-3:
         return arr
     h, w, _ = arr.shape
     new_w = max(1, int(round(w * scale_x)))
+    if _HAS_CV2:
+        stretched = cv2.resize(arr, (new_w, h), interpolation=cv2.INTER_LINEAR)
+        canvas = np.zeros((h, w, 4), dtype=np.uint8)
+        paste_x = int(round(center_x - center_x * scale_x))
+        src_x0 = max(0, -paste_x)
+        dst_x0 = max(0, paste_x)
+        copy_w = min(new_w - src_x0, w - dst_x0)
+        if copy_w > 0:
+            canvas[:, dst_x0 : dst_x0 + copy_w, :] = stretched[:, src_x0 : src_x0 + copy_w, :]
+        return canvas
+
     img = Image.fromarray(arr, mode="RGBA")
     stretched = img.resize((new_w, h), resample=Image.Resampling.BILINEAR)
     canvas = Image.new("RGBA", (w, h), (0, 0, 0, 0))
-    # Map old center_x -> int(center_x * scale_x) and align back to center_x
     paste_x = int(round(center_x - center_x * scale_x))
     canvas.paste(stretched, (paste_x, 0))
     return np.array(canvas, dtype=np.uint8)
 
 
-def _apply_horizontal_echo(arr: np.ndarray, offsets_px: Sequence[int], alpha_mult: float) -> np.ndarray:
-    """Optional horizontal ghost copies at +/- offsets_px with alpha_mult."""
-    base_img = Image.fromarray(arr, mode="RGBA")
+def apply_horizontal_echo(arr: np.ndarray, offsets_px: Sequence[int], alpha_mult: float) -> np.ndarray:
     h, w, _ = arr.shape
-    echo_arr = arr.copy()
-    echo_arr[:, :, 3] = np.clip(echo_arr[:, :, 3].astype(np.float32) * alpha_mult, 0, 255).astype(np.uint8)
-    echo_img = Image.fromarray(echo_arr, mode="RGBA")
-
-    out = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    echo = arr.copy()
+    echo[:, :, 3] = np.clip(echo[:, :, 3].astype(np.float32) * alpha_mult, 0, 255).astype(np.uint8)
+    out = np.zeros_like(arr)
     for off in offsets_px:
         for sign in (-1, 1):
-            shifted = Image.new("RGBA", (w, h), (0, 0, 0, 0))
-            shifted.paste(echo_img, (sign * off, 0))
-            out = Image.alpha_composite(out, shifted)
-    out = Image.alpha_composite(out, base_img)
-    return np.array(out, dtype=np.uint8)
+            shift = sign * off
+            shifted = np.zeros_like(arr)
+            if shift > 0 and shift < w:
+                shifted[:, shift:, :] = echo[:, : w - shift, :]
+            elif shift < 0 and -shift < w:
+                shifted[:, : w + shift, :] = echo[:, -shift:, :]
+            out = _alpha_over(out, shifted)
+    return _alpha_over(out, arr)
+
+
+def apply_smear_strip(
+    base_arr: np.ndarray,
+    ry0: int,
+    ry1: int,
+    rx0: int,
+    rx1: int,
+    word_center_x: int,
+    smear_level: int,
+    width: int,
+    sigma1_1080: float,
+    scale1_x: float,
+    sigma2_1080: float,
+    scale2_x: float,
+    smear_echo: bool = False,
+    echo_offsets_1080: Sequence[int] = (8, 16, 24),
+    echo_alpha: float = 0.35,
+) -> np.ndarray:
+    """
+    Applies horizontal-only smear + scaleX ONLY on the active vertical+horizontal ROI,
+    dramatically cutting work compared to blurring full 1080px width.
+    """
+    if smear_level <= 0:
+        return base_arr
+    scale = width / 1080.0
+    sigma_x = (sigma1_1080 if smear_level == 2 else sigma2_1080) * scale
+    sc_x = scale1_x if smear_level == 2 else scale2_x
+    echo_pad = int(round(max(echo_offsets_1080) * scale)) if (smear_level == 2 and smear_echo and echo_offsets_1080) else 0
+    x_pad = max(32, int(math.ceil(sigma_x * 3.5)) + int(math.ceil((rx1 - rx0) * (sc_x - 1.0) * 0.6)) + echo_pad + 8)
+    sx0 = max(0, rx0 - x_pad)
+    sx1 = min(width, rx1 + x_pad)
+    local_cx = word_center_x - sx0
+
+    roi = base_arr[ry0:ry1, sx0:sx1, :]
+    roi = scale_x_about_center(roi, sc_x, local_cx)
+    if smear_level == 2 and smear_echo:
+        offs = [max(1, int(round(o * scale))) for o in echo_offsets_1080]
+        roi = apply_horizontal_echo(roi, offs, echo_alpha)
+    roi = horizontal_gaussian_blur_1d(roi, sigma_x)
+
+    out = np.zeros_like(base_arr)
+    out[ry0:ry1, sx0:sx1, :] = roi
+    return out
+
+
+# ─────────────────────── Caption Strip Sprite Renderer ───────────────────────
+def compute_caption_strip_geometry(
+    canvas_w: int,
+    canvas_h: int,
+    window_top: int,
+    window_h: int,
+    style: CaptionStyle = KARAOKE_POP,
+) -> Tuple[int, int, int]:
+    """
+    Returns (strip_h, strip_y, caption_center_y).
+    Strip height = ~3 * font_px (about 330px at 1080w), centered at window_top + 0.54*window_h.
+    """
+    font_px = max(20, int(round(style.font_size_pct * canvas_w)))
+    strip_h = min(canvas_h, max(200, int(round(font_px * style.strip_height_font_mult))))
+    strip_h += strip_h % 2
+    caption_center_y = window_top + int(round(window_h * style.center_y_pct))
+    strip_y = max(0, min(canvas_h - strip_h, caption_center_y - strip_h // 2))
+    return strip_h, strip_y, caption_center_y
 
 
 def _render_sharp_base(
@@ -623,37 +665,34 @@ def _render_sharp_base(
     width: int,
     band_h: int,
     style: CaptionStyle = KARAOKE_POP,
-) -> Tuple[np.ndarray, int, int, int]:
+    local_center_y: Optional[float] = None,
+) -> Tuple[np.ndarray, int, int, int, int, int]:
     """
-    Renders the sharp (smear_level=0) RGBA band sprite by drawing & filtering ONLY
-    inside the tight padded ROI around the word, then placing it into (band_h, width, 4).
-    Returns (full_band_arr, roi_y0, roi_y1, word_center_x).
+    Renders sharp (smear_level=0) RGBA band sprite using tight ROI rendering:
+      1. Drop shadow (black, alpha 0.7, offset (+3,+4)*(W/1080), sigma 1.5)
+      2. Wide glow (word's own pure color, sigma ~9px, alpha 0.65, normal alpha-over)
+      3. Tight glow (word's own pure color, sigma ~3px, alpha 0.90, normal alpha-over)
+      4. Crisp Times New Roman Regular glyphs (no stroke, no box)
+    Returns (full_band_arr, ry0, ry1, rx0, rx1, word_center_x).
     """
     scale = width / 1080.0
     base_font_size = max(20, int(round(style.font_size_pct * width)))
-    font = _load_font(base_font_size, style)
-
-    meas = getattr(_FONT_TLS, "meas", None)
-    if meas is None:
-        meas = ImageDraw.Draw(Image.new("RGBA", (1, 1), (0, 0, 0, 0)))
-        _FONT_TLS.meas = meas
-
+    font = _load_font(base_font_size, style.font_paths)
+    meas = _get_meas_draw()
     max_w = int(round(style.max_word_width_pct * width))
 
-    # Shrink to fit if word exceeds 0.9*W
     word_bbox = meas.textbbox((0, 0), ev.word, font=font)
     word_w = word_bbox[2] - word_bbox[0]
     if word_w > max_w and word_w > 0:
         shrunk_size = max(16, int(math.floor(base_font_size * (max_w / word_w))))
-        font = _load_font(shrunk_size, style)
+        font = _load_font(shrunk_size, style.font_paths)
         word_bbox = meas.textbbox((0, 0), ev.word, font=font)
         word_w = word_bbox[2] - word_bbox[0]
 
-    # Compute steady line-box baseline using canonical ascender+baseline ('Every') so
-    # vertical center of the line box sits at band_h // 2 (which maps to 0.54 * H on canvas)
     ref_bbox = meas.textbbox((0, 0), "Every", font=font)
     ref_center_from_origin = (ref_bbox[1] + ref_bbox[3]) / 2.0
-    draw_y = int(round((band_h / 2.0) - ref_center_from_origin))
+    cy_target = (band_h / 2.0) if local_center_y is None else local_center_y
+    draw_y = int(round(cy_target - ref_center_from_origin))
 
     anchor_x = int(round(style.anchor_x_pct * width))
     margin = max(12, int(round(0.05 * width)))
@@ -663,16 +702,10 @@ def _render_sharp_base(
 
     sh_dx = int(round(style.shadow_offset_x_1080 * scale))
     sh_dy = int(round(style.shadow_offset_y_1080 * scale))
-    sh_a = int(round(255 * style.shadow_alpha))
-    sr, sg, sb = style.shadow_color
+    dil_px = int(round(style.glow_dilate_px * scale))
+    wide_sigma = style.wide_glow_sigma_1080 * scale
+    pad_xy = max(36, int(math.ceil(wide_sigma * 3.8)) + dil_px + max(abs(sh_dx), abs(sh_dy)) + 8)
 
-    dilate_k = int(round(style.glow_dilate_px))
-    if dilate_k >= 3 and dilate_k % 2 == 0:
-        dilate_k += 1
-    glow_sigma = style.glow_sigma_1080 * scale
-    pad_xy = max(32, int(math.ceil(glow_sigma * 4.0)) + dilate_k + max(abs(sh_dx), abs(sh_dy)) + 8)
-
-    # Compute exact tight ROI around drawn glyphs + glow + shadow
     gx0 = start_x + word_bbox[0]
     gy0 = draw_y + word_bbox[1]
     gx1 = start_x + word_bbox[2]
@@ -688,101 +721,296 @@ def _render_sharp_base(
     local_x = start_x - rx0
     local_y = draw_y - ry0
 
-    fill_layer = Image.new("RGBA", (roi_w, roi_h), (0, 0, 0, 0))
-    shadow_layer = Image.new("RGBA", (roi_w, roi_h), (0, 0, 0, 0))
-    fill_draw = ImageDraw.Draw(fill_layer)
-    sh_draw = ImageDraw.Draw(shadow_layer)
-
     main_rgb = style.palette[ev.main_color_name]
     white_rgb = style.palette[style.emphasis_base_color]
 
+    # Build clean per-color alpha masks + drop shadow mask
+    shadow_mask_img = Image.new("L", (roi_w, roi_h), 0)
+    ImageDraw.Draw(shadow_mask_img).text((local_x + sh_dx, local_y + sh_dy), ev.word, font=font, fill=255)
+    sh_blur = _blur_mask_2d(np.array(shadow_mask_img, dtype=np.uint8), style.shadow_blur_sigma * scale)
+    sh_alpha = np.clip(sh_blur.astype(np.float32) * style.shadow_alpha, 0, 255).astype(np.uint8)
+    comp = _make_colored_layer(style.shadow_color, sh_alpha)
+
     if ev.window_index is None:
-        r, g, b = main_rgb
-        fill_draw.text((local_x, local_y), ev.word, font=font, fill=(r, g, b, 255))
-        sh_draw.text((local_x + sh_dx, local_y + sh_dy), ev.word, font=font, fill=(sr, sg, sb, sh_a))
+        glyph_mask_img = Image.new("L", (roi_w, roi_h), 0)
+        ImageDraw.Draw(glyph_mask_img).text((local_x, local_y), ev.word, font=font, fill=255)
+        g_mask = np.array(glyph_mask_img, dtype=np.uint8)
+
+        if style.glow_enabled:
+            wide_gl, tight_gl = build_two_layer_glow(
+                g_mask, main_rgb, scale,
+                style.wide_glow_sigma_1080, style.wide_glow_alpha, style.wide_glow_gain,
+                style.tight_glow_sigma_1080, style.tight_glow_alpha, style.tight_glow_gain,
+                style.glow_dilate_px,
+            )
+            comp = _alpha_over(comp, wide_gl)
+            comp = _alpha_over(comp, tight_gl)
+
+        comp = _alpha_over(comp, _make_colored_layer(main_rgb, g_mask))
     else:
+        white_mask_img = Image.new("L", (roi_w, roi_h), 0)
+        win_mask_img = Image.new("L", (roi_w, roi_h), 0)
+        wd = ImageDraw.Draw(white_mask_img)
+        cd = ImageDraw.Draw(win_mask_img)
         prefix = ""
         for idx, ch_txt in enumerate(ev.chunks):
             px_off = int(round(meas.textlength(prefix, font=font))) if prefix else 0
             cx = local_x + px_off
-            r, g, b = main_rgb if idx == ev.window_index else white_rgb
-            fill_draw.text((cx, local_y), ch_txt, font=font, fill=(r, g, b, 255))
+            if idx == ev.window_index:
+                cd.text((cx, local_y), ch_txt, font=font, fill=255)
+            else:
+                wd.text((cx, local_y), ch_txt, font=font, fill=255)
             prefix += ch_txt
-        sh_draw.text((local_x + sh_dx, local_y + sh_dy), ev.word, font=font, fill=(sr, sg, sb, sh_a))
 
-    # Layer 1 (bottom): Drop shadow (black 70%, offset (+3,+4)*(W/1080), blur sigma 1.5)
-    shadow_blurred = shadow_layer.filter(ImageFilter.GaussianBlur(radius=style.shadow_blur_sigma * scale))
+        w_mask = np.array(white_mask_img, dtype=np.uint8)
+        c_mask = np.array(win_mask_img, dtype=np.uint8)
 
-    # Layer 2 (middle): Outer glow in the word's OWN color (~12px radius / sigma ~6, 60% opacity)
-    if dilate_k >= 3:
-        fill_arr = np.array(fill_layer, dtype=np.uint8)
-        glow_src = Image.fromarray(_separable_max_filter(fill_arr, dilate_k), mode="RGBA")
-    else:
-        glow_src = fill_layer
-    glow_blurred = glow_src.filter(ImageFilter.GaussianBlur(radius=glow_sigma))
-    glow_arr = np.array(glow_blurred, dtype=np.uint8)
-    boosted_a = np.minimum(255.0, glow_arr[:, :, 3].astype(np.float32) * style.glow_gain)
-    glow_arr[:, :, 3] = np.clip(boosted_a * style.glow_opacity, 0, 255).astype(np.uint8)
-    glow_layer = Image.fromarray(glow_arr, mode="RGBA")
+        if style.glow_enabled:
+            w_wide, w_tight = build_two_layer_glow(
+                w_mask, white_rgb, scale,
+                style.wide_glow_sigma_1080, style.wide_glow_alpha, style.wide_glow_gain,
+                style.tight_glow_sigma_1080, style.tight_glow_alpha, style.tight_glow_gain,
+                style.glow_dilate_px,
+            )
+            c_wide, c_tight = build_two_layer_glow(
+                c_mask, main_rgb, scale,
+                style.wide_glow_sigma_1080, style.wide_glow_alpha, style.wide_glow_gain,
+                style.tight_glow_sigma_1080, style.tight_glow_alpha, style.tight_glow_gain,
+                style.glow_dilate_px,
+            )
+            # Composite wide glows then tight glows (normal alpha-over)
+            comp = _alpha_over(comp, w_wide)
+            comp = _alpha_over(comp, c_wide)
+            comp = _alpha_over(comp, w_tight)
+            comp = _alpha_over(comp, c_tight)
 
-    # Composite bottom -> top: Shadow -> Outer Glow -> Crisp Glyphs
-    comp = Image.alpha_composite(shadow_blurred, glow_layer)
-    comp = Image.alpha_composite(comp, fill_layer)
+        comp = _alpha_over(comp, _make_colored_layer(white_rgb, w_mask))
+        comp = _alpha_over(comp, _make_colored_layer(main_rgb, c_mask))
 
     full_arr = np.zeros((band_h, width, 4), dtype=np.uint8)
-    full_arr[ry0:ry1, rx0:rx1, :] = np.array(comp, dtype=np.uint8)
-    return full_arr, ry0, ry1, word_center_x
-
-
-def _apply_smear_to_base(
-    base_arr: np.ndarray,
-    ry0: int,
-    ry1: int,
-    word_center_x: int,
-    smear_level: int,
-    width: int,
-    style: CaptionStyle = KARAOKE_POP,
-) -> np.ndarray:
-    """Applies horizontal-only smear + scaleX ONLY across active vertical rows [ry0:ry1]."""
-    if smear_level <= 0:
-        return base_arr
-    scale = width / 1080.0
-    strip = base_arr[ry0:ry1, :, :]
-    if smear_level == 2:
-        strip = _scale_x_about_center(strip, style.smear_phase1_scale_x, word_center_x)
-        if style.smear_echo:
-            offs = [max(1, int(round(o * scale))) for o in style.smear_echo_offsets_1080]
-            strip = _apply_horizontal_echo(strip, offs, style.smear_echo_alpha)
-        strip = _horizontal_gaussian_blur_1d(strip, style.smear_phase1_sigma_x_1080 * scale)
-    elif smear_level == 1:
-        strip = _scale_x_about_center(strip, style.smear_phase2_scale_x, word_center_x)
-        strip = _horizontal_gaussian_blur_1d(strip, style.smear_phase2_sigma_x_1080 * scale)
-
-    out = np.zeros_like(base_arr)
-    out[ry0:ry1, :, :] = strip
-    return out
+    full_arr[ry0:ry1, rx0:rx1, :] = comp
+    return full_arr, ry0, ry1, rx0, rx1, word_center_x
 
 
 def render_event_sprite(
     ev: RenderEvent,
     width: int,
     band_h: int,
-    smear_level: int,          # 2 = 0-33ms heavy, 1 = 33-66ms medium, 0 = sharp
+    smear_level: int,
     style: CaptionStyle = KARAOKE_POP,
+    local_center_y: Optional[float] = None,
 ) -> np.ndarray:
-    """
-    Renders one transparent RGBA band sprite for (word, window_index, smear_level).
-    Layers bottom -> top:
-      1. Drop shadow (black 70%, offset (+3,+4)*(W/1080), blur sigma 1.5)
-      2. Outer glow (glyph's own color, radius ~12px / sigma ~6, 60% opacity; white glow for white text)
-      3. Solid Times New Roman Regular glyphs (NO stroke, NO box)
-    Then applies horizontal-only smear + scaleX about word center when smear_level > 0.
-    """
-    base_arr, ry0, ry1, word_center_x = _render_sharp_base(ev, width, band_h, style)
-    return _apply_smear_to_base(base_arr, ry0, ry1, word_center_x, smear_level, width, style)
+    base_arr, ry0, ry1, rx0, rx1, word_center_x = _render_sharp_base(ev, width, band_h, style, local_center_y)
+    return apply_smear_strip(
+        base_arr, ry0, ry1, rx0, rx1, word_center_x, smear_level, width,
+        style.smear_phase1_sigma_x_1080, style.smear_phase1_scale_x,
+        style.smear_phase2_sigma_x_1080, style.smear_phase2_scale_x,
+        style.smear_echo, style.smear_echo_offsets_1080, style.smear_echo_alpha,
+    )
 
 
-# ─────────────────────── Video Probing & Compositing Pipeline ───────────────────────
+# ─────────────────────── Sprite Factory (Memory + Disk Cache + ffconcat) ───────────────────────
+def _style_fingerprint(style: CaptionStyle) -> str:
+    payload = (
+        f"v2|{style.font_size_pct:.4f}|{style.anchor_x_pct:.4f}|{style.glow_enabled}|"
+        f"{style.glow_dilate_px}|{style.wide_glow_sigma_1080}|{style.wide_glow_alpha}|{style.wide_glow_gain}|"
+        f"{style.tight_glow_sigma_1080}|{style.tight_glow_alpha}|{style.tight_glow_gain}|"
+        f"{style.smear_phase1_sigma_x_1080}|{style.smear_phase1_scale_x}|{style.smear_echo}"
+    )
+    return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:10]
+
+
+def _sprite_cache_key(
+    ev: RenderEvent,
+    smear_level: int,
+    width: int,
+    strip_h: int,
+    local_cy: int,
+    style_fp: str,
+) -> str:
+    raw = f"cap|{style_fp}|{width}x{strip_h}|cy{local_cy}|{ev.word}|{ev.window_index}|{ev.main_color_name}|sm{smear_level}"
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()
+
+
+def ensure_empty_sprite(width: int, strip_h: int, cache_dir: Path) -> Path:
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    p = cache_dir / f"empty_{width}x{strip_h}.png"
+    if not p.exists():
+        img = Image.new("RGBA", (width, strip_h), (0, 0, 0, 0))
+        tmp = p.with_suffix(".tmp.png")
+        img.save(tmp, format="PNG", compress_level=1)
+        os.replace(tmp, p)
+    return p
+
+
+def _save_png_fast(arr: np.ndarray, out_path: Path) -> Path:
+    tmp = out_path.with_name(f".{out_path.name}.{os.getpid()}.{threading.get_ident()}.tmp.png")
+    if _HAS_CV2:
+        bgra = cv2.cvtColor(arr, cv2.COLOR_RGBA2BGRA)
+        cv2.imwrite(str(tmp), bgra, [cv2.IMWRITE_PNG_COMPRESSION, 1])
+    else:
+        Image.fromarray(arr, mode="RGBA").save(tmp, format="PNG", compress_level=1)
+    os.replace(tmp, out_path)
+    return out_path
+
+
+def resolve_writable_cache_dir(preferred: str, fallback: Path) -> Path:
+    """Uses preferred cache dir (~/.cache/openclip/sprites), falling back cleanly if read-only."""
+    pref = Path(preferred)
+    try:
+        pref.mkdir(parents=True, exist_ok=True)
+        probe = pref / f".probe_{os.getpid()}"
+        probe.write_bytes(b"1")
+        probe.unlink(missing_ok=True)
+        return pref
+    except Exception:
+        fallback.mkdir(parents=True, exist_ok=True)
+        return fallback
+
+
+def build_caption_ffconcat(
+    events: Sequence[RenderEvent],
+    duration: float,
+    fps: float,
+    canvas_w: int,
+    canvas_h: int,
+    window_top: int,
+    window_h: int,
+    work_dir: Path,
+    style: CaptionStyle = KARAOKE_POP,
+    use_disk_cache: bool = True,
+) -> Tuple[Path, int, int, Dict[str, int]]:
+    """
+    Generates cached strip-sized PNG sprites (one per distinct state) in parallel and writes
+    `captions.ffconcat` with frame-quantized durations + transparent gaps + transparent tail.
+    Returns (ffconcat_path, strip_h, strip_y, stats_dict).
+    """
+    work_dir.mkdir(parents=True, exist_ok=True)
+    if use_disk_cache:
+        from openclip_engine.core.config import CACHE_DIR
+        cache_dir = resolve_writable_cache_dir(style.sprite_cache_dir, CACHE_DIR / "sprites")
+    else:
+        cache_dir = work_dir / "sprites"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+
+    strip_h, strip_y, caption_center_y = compute_caption_strip_geometry(
+        canvas_w, canvas_h, window_top, window_h, style
+    )
+    local_cy = caption_center_y - strip_y
+    style_fp = _style_fingerprint(style)
+
+    empty_png = ensure_empty_sprite(canvas_w, strip_h, cache_dir)
+
+    # Identify unique base states needed -> each base generates smear_level 0, 1, 2
+    base_jobs: Dict[Tuple[str, Optional[int], str], RenderEvent] = {}
+    for ev in events:
+        bk = (ev.word, ev.window_index, ev.main_color_name)
+        if bk not in base_jobs:
+            base_jobs[bk] = ev
+
+    needed_paths: Dict[Tuple[str, Optional[int], str, int], Path] = {}
+    miss_groups: List[Tuple[Tuple[str, Optional[int], str], RenderEvent, List[int]]] = []
+    hits = 0
+    misses = 0
+
+    for bk, ev in base_jobs.items():
+        missing_smears: List[int] = []
+        for sm in (2, 1, 0):
+            ck = _sprite_cache_key(ev, sm, canvas_w, strip_h, local_cy, style_fp)
+            png_path = cache_dir / f"{ck}.png"
+            needed_paths[(bk[0], bk[1], bk[2], sm)] = png_path
+            if use_disk_cache and (ck in _SPRITE_MEM_CACHE or png_path.exists()):
+                _SPRITE_MEM_CACHE[ck] = png_path
+                hits += 1
+            else:
+                missing_smears.append(sm)
+                misses += 1
+        if missing_smears:
+            miss_groups.append((bk, ev, missing_smears))
+
+    def _render_group(item: Tuple[Tuple[str, Optional[int], str], RenderEvent, List[int]]) -> None:
+        bk, ev, smears = item
+        base_arr, ry0, ry1, rx0, rx1, word_cx = _render_sharp_base(
+            ev, canvas_w, strip_h, style, local_center_y=float(local_cy)
+        )
+        for sm in smears:
+            arr = apply_smear_strip(
+                base_arr, ry0, ry1, rx0, rx1, word_cx, sm, canvas_w,
+                style.smear_phase1_sigma_x_1080, style.smear_phase1_scale_x,
+                style.smear_phase2_sigma_x_1080, style.smear_phase2_scale_x,
+                style.smear_echo, style.smear_echo_offsets_1080, style.smear_echo_alpha,
+            )
+            out_p = needed_paths[(bk[0], bk[1], bk[2], sm)]
+            _save_png_fast(arr, out_p)
+            ck = _sprite_cache_key(ev, sm, canvas_w, strip_h, local_cy, style_fp)
+            if use_disk_cache:
+                with _SPRITE_LOCK:
+                    _SPRITE_MEM_CACHE[ck] = out_p
+
+    if miss_groups:
+        n_workers = max(1, min(len(miss_groups), max(1, (os.cpu_count() or 4) - 2)))
+        if n_workers == 1 or len(miss_groups) <= 2:
+            for item in miss_groups:
+                _render_group(item)
+        else:
+            with ThreadPoolExecutor(max_workers=n_workers) as pool:
+                list(pool.map(_render_group, miss_groups))
+
+    # Build exact per-frame ffconcat entries (paired with `-r <fps> -f concat -safe 0`)
+    # Avoids FFmpeg image2's default 25fps (40ms) duration quantization while running at ~2600 fps.
+    total_frames = max(1, int(math.ceil(duration * fps)))
+    frame_paths: List[Path] = [empty_png] * total_frames
+
+    # Smear phase frame counts (time-based, fps-independent)
+    p1_frames = max(1, int(round((style.smear_phase1_ms / 1000.0) * fps)))
+    p2_frames = max(1, int(round(((style.smear_phase2_ms - style.smear_phase1_ms) / 1000.0) * fps)))
+
+    cursor_f = 0
+    for ev in events:
+        f_start = max(cursor_f, int(math.ceil(ev.start * fps - 1e-6)))
+        f_end = min(total_frames, int(math.ceil(ev.end * fps - 1e-6)))
+        if f_end <= f_start:
+            continue
+
+        bk = (ev.word, ev.window_index, ev.main_color_name)
+        p_sm2 = needed_paths[(bk[0], bk[1], bk[2], 2)]
+        p_sm1 = needed_paths[(bk[0], bk[1], bk[2], 1)]
+        p_sh0 = needed_paths[(bk[0], bk[1], bk[2], 0)]
+
+        for fi in range(f_start, f_end):
+            rel = fi - f_start
+            if rel < p1_frames:
+                frame_paths[fi] = p_sm2
+            elif rel < p1_frames + p2_frames:
+                frame_paths[fi] = p_sm1
+            else:
+                frame_paths[fi] = p_sh0
+        cursor_f = f_end
+
+    # Append a small transparent tail (2 frames) so eof_action=pass transitions cleanly
+    frame_paths.extend([empty_png, empty_png])
+
+    ffconcat_path = work_dir / "captions.ffconcat"
+    esc_cache: Dict[Path, str] = {}
+    lines = ["ffconcat version 1.0"]
+    for p in frame_paths:
+        line = esc_cache.get(p)
+        if line is None:
+            esc = str(p).replace("'", "'\\''")
+            line = f"file '{esc}'"
+            esc_cache[p] = line
+        lines.append(line)
+    ffconcat_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    return ffconcat_path, strip_h, strip_y, {
+        "unique_bases": len(base_jobs),
+        "cache_hits": hits,
+        "cache_misses": misses,
+        "frames": len(frame_paths),
+    }
+
+
+# ─────────────────────── Video Probing & Standalone Caption API ───────────────────────
 def probe_video_stream(video_path: Union[str, Path], ffmpeg_bin: str = "ffmpeg") -> Tuple[int, int, float, float]:
     """Returns (width, height, fps, duration_s) from ffprobe."""
     ffprobe_bin = ffmpeg_bin.replace("ffmpeg", "ffprobe")
@@ -794,8 +1022,7 @@ def probe_video_stream(video_path: Union[str, Path], ffmpeg_bin: str = "ffmpeg")
         str(video_path),
     ]
     res = subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=15)
-    import json as _json
-    data = _json.loads(res.stdout)
+    data = json.loads(res.stdout)
     stream = (data.get("streams") or [{}])[0]
     width = int(stream.get("width") or 1080)
     height = int(stream.get("height") or 1920)
@@ -825,12 +1052,12 @@ def render_captions(
     ffmpeg_bin: str = "ffmpeg",
     reframe_vf: Optional[str] = None,
     output_dims: Optional[Tuple[int, int]] = None,
+    window_top: int = 0,
+    window_h: Optional[int] = None,
 ) -> Path:
     """
-    Public API: burns Karaoke Pop word-by-word captions onto video_in.
-      - Preserves input resolution and fps (or applies optional single-pass reframe_vf + output_dims).
-      - Encodes H.264 yuv420p CRF 18, -c:a copy, +faststart.
-      - Caches sprites keyed by (word, window_index, smear_level) and reuses one zero-alpha empty frame.
+    Burns Karaoke Pop captions onto video_in in ONE FFmpeg process via ffconcat sprite track
+    (zero Python per-frame piping). Preserves resolution/fps, H.264 yuv420p CRF 18, -c:a copy, +faststart.
     """
     video_in_p = Path(video_in)
     out_p = Path(out_path)
@@ -838,105 +1065,55 @@ def render_captions(
 
     src_w, src_h, fps, duration = probe_video_stream(video_in_p, ffmpeg_bin)
     width, height = output_dims if output_dims is not None else (src_w, src_h)
+    eff_win_h = window_h if window_h is not None else height
     eff_clip_end = clip_end if clip_end is not None else (clip_start + duration)
     events = build_render_events(words, fps=fps, clip_start=clip_start, clip_end=eff_clip_end, style=style)
 
-    # Band centered at style.center_y_pct (0.54 * H), generous height for font + glow + shadow
-    band_h = min(height, max(240, int(round(height * style.band_height_pct))))
-    band_h += band_h % 2
-    center_y = int(round(height * style.center_y_pct))
-    band_y = max(0, min(height - band_h, center_y - band_h // 2))
-
-    total_frames = max(1, int(round(duration * fps)) + 2)
     fps_arg = f"{fps:.6f}".rstrip("0").rstrip(".")
+    cores = str(os.cpu_count() or 4)
 
-    if reframe_vf:
-        filter_complex = f"[0:v]{reframe_vf}[vbase];[vbase][1:v]overlay=0:{band_y}:shortest=1[vout]"
-    else:
-        filter_complex = f"[0:v][1:v]overlay=0:{band_y}:shortest=1[vout]"
+    with tempfile.TemporaryDirectory(prefix="oc_cap_") as td:
+        ffconcat_path, _, strip_y, _ = build_caption_ffconcat(
+            events=events,
+            duration=duration,
+            fps=fps,
+            canvas_w=width,
+            canvas_h=height,
+            window_top=window_top,
+            window_h=eff_win_h,
+            work_dir=Path(td),
+            style=style,
+        )
 
-    cmd = [
-        ffmpeg_bin, "-y", "-loglevel", "error",
-        "-i", str(video_in_p),
-        "-f", "rawvideo", "-pix_fmt", "rgba",
-        "-s", f"{width}x{band_h}", "-r", fps_arg,
-        "-i", "pipe:0",
-        "-filter_complex", filter_complex,
-        "-map", "[vout]",
-        "-map", "0:a?",
-        "-c:v", "libx264", "-preset", "veryfast", "-crf", str(style.crf), "-pix_fmt", "yuv420p",
-        "-c:a", "copy",
-        "-movflags", "+faststart",
-        str(out_p),
-    ]
+        if reframe_vf:
+            fc = (
+                f"[0:v]{reframe_vf}[vbase];"
+                f"[1:v]fps={fps_arg},format=rgba[cap];"
+                f"[vbase][cap]overlay=0:{strip_y}:eof_action=pass:format=auto,format=yuv420p[vout]"
+            )
+        else:
+            fc = (
+                f"[1:v]fps={fps_arg},format=rgba[cap];"
+                f"[0:v][cap]overlay=0:{strip_y}:eof_action=pass:format=auto,format=yuv420p[vout]"
+            )
 
-    empty_frame_bytes = bytes(width * band_h * 4)
-    sprite_cache: Dict[Tuple[str, Optional[int], str, int], bytes] = {}
-    base_cache: Dict[Tuple[str, Optional[int], str], Tuple[np.ndarray, int, int, int]] = {}
-
-    # Precompute the first frame timestamp of each event so frame 0 always receives 0ms smear
-    ev_first_frame_t = [math.ceil(ev.start * fps - 1e-6) / fps for ev in events]
-
-    proc = subprocess.Popen(
-        cmd,
-        stdin=subprocess.PIPE,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.PIPE,
-    )
-
-    try:
-        assert proc.stdin is not None
-        ev_idx = 0
-        n_ev = len(events)
-
-        for frame_i in range(total_frames):
-            t = frame_i / fps
-            while ev_idx < n_ev and t >= events[ev_idx].end - 1e-6:
-                ev_idx += 1
-
-            if ev_idx >= n_ev or t < events[ev_idx].start - 1e-6:
-                proc.stdin.write(empty_frame_bytes)
-                continue
-
-            ev = events[ev_idx]
-            dt_ms = max(0.0, (t - ev_first_frame_t[ev_idx]) * 1000.0)
-            if dt_ms < style.smear_phase1_ms - 1e-6:
-                smear_level = 2
-            elif dt_ms < style.smear_phase2_ms - 1e-6:
-                smear_level = 1
-            else:
-                smear_level = 0
-
-            cache_key = (ev.word, ev.window_index, ev.main_color_name, smear_level)
-            frame_bytes = sprite_cache.get(cache_key)
-            if frame_bytes is None:
-                base_key = (ev.word, ev.window_index, ev.main_color_name)
-                base_entry = base_cache.get(base_key)
-                if base_entry is None:
-                    base_entry = _render_sharp_base(ev, width, band_h, style)
-                    base_cache[base_key] = base_entry
-                base_arr, ry0, ry1, word_center_x = base_entry
-                arr = _apply_smear_to_base(base_arr, ry0, ry1, word_center_x, smear_level, width, style)
-                frame_bytes = arr.tobytes()
-                sprite_cache[cache_key] = frame_bytes
-
-            proc.stdin.write(frame_bytes)
-
-        proc.stdin.close()
-        stderr_data = proc.stderr.read().decode("utf-8", errors="ignore") if proc.stderr else ""
-        ret = proc.wait(timeout=180)
-        if ret != 0 or not out_p.exists() or out_p.stat().st_size < 1000:
-            raise RuntimeError(f"FFmpeg render_captions failed (rc={ret}): {stderr_data[-400:]}")
+        cmd = [
+            ffmpeg_bin, "-y", "-loglevel", "error",
+            "-filter_threads", cores, "-filter_complex_threads", cores,
+            "-i", str(video_in_p),
+            "-r", fps_arg, "-f", "concat", "-safe", "0", "-i", str(ffconcat_path),
+            "-filter_complex", fc,
+            "-map", "[vout]",
+            "-map", "0:a?",
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", str(style.crf), "-pix_fmt", "yuv420p",
+            "-c:a", "copy",
+            "-movflags", "+faststart",
+            str(out_p),
+        ]
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+        if res.returncode != 0 or not out_p.exists() or out_p.stat().st_size < 1000:
+            raise RuntimeError(f"FFmpeg render_captions failed (rc={res.returncode}): {res.stderr[-400:]}")
         return out_p
-    except BrokenPipeError:
-        stderr_data = proc.stderr.read().decode("utf-8", errors="ignore") if proc.stderr else ""
-        proc.wait(timeout=30)
-        if out_p.exists() and out_p.stat().st_size > 1000:
-            return out_p
-        raise RuntimeError(f"FFmpeg render_captions pipe closed early: {stderr_data[-400:]}")
-    finally:
-        if proc.poll() is None:
-            proc.kill()
 
 
 def cues_to_words(cues: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -988,11 +1165,43 @@ def build_karaoke_pop_clip(
     aspect_ratio: str = "9:16",
     ffmpeg_bin: str = "ffmpeg",
     style: CaptionStyle = KARAOKE_POP,
+    title: Optional[str] = None,
+    sfx_mode: str = "rules",
+    quality: str = "balanced",
 ) -> Path:
     """
-    Pipeline adapter: reframes raw_clip_path to target aspect_ratio AND burns Karaoke Pop
-    captions in a single FFmpeg pass (avoiding double H.264 encode overhead).
+    Pipeline adapter: for 9:16 exports, uses the full polished vertical renderer
+    (4:5 video window on blurred 9:16 canvas + adaptive grade + Karaoke Pop captions + title + SFX).
+    For other aspect ratios (e.g. 4:5 / 16:9 / 1:1), renders single-pass reframe + Karaoke Pop.
     """
+    words = cues_to_words(cues)
+    if aspect_ratio in ("9:16", "4:5", "3:4"):
+        from dataclasses import replace as dc_replace
+        from openclip_engine.clipping.clip_renderer import render_polished_clip
+        from openclip_engine.clipping.config_styles import DEFAULT_LAYOUT, DEFAULT_SFX_CONFIG, PLAIN_4_5_LAYOUT
+
+        if aspect_ratio == "4:5":
+            layout = dc_replace(PLAIN_4_5_LAYOUT, quality=quality)
+        elif aspect_ratio == "3:4":
+            layout = dc_replace(DEFAULT_LAYOUT, video_aspect="3:4", quality=quality)
+        else:
+            layout = dc_replace(DEFAULT_LAYOUT, quality=quality)
+
+        sfx_cfg = dc_replace(DEFAULT_SFX_CONFIG, mode=sfx_mode)
+        return render_polished_clip(
+            video_in=raw_clip_path,
+            words=words,
+            out_path=final_clip_path,
+            clip_start=clip_start,
+            clip_end=clip_end,
+            title=title,
+            layout=layout,
+            caption_style=style,
+            sfx_config=sfx_cfg,
+            ffmpeg_bin=ffmpeg_bin,
+            seek_source=False,  # raw_clip_path is already cut to [clip_start, clip_end]
+        )
+
     from openclip_engine.clipping.caption_burner import ASPECT_DIMS
 
     target_w, target_h = ASPECT_DIMS.get(aspect_ratio, (1080, 1920))
@@ -1002,8 +1211,6 @@ def build_karaoke_pop_clip(
         f"'if(gt(iw/ih,{ratio_expr}),ih,iw/({ratio_expr}))',"
         f"scale={target_w}:{target_h}:flags=lanczos,setsar=1,setpts=PTS-STARTPTS"
     )
-
-    words = cues_to_words(cues)
     return render_captions(
         video_in=raw_clip_path,
         words=words,

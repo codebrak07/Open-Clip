@@ -54,3 +54,5 @@ __pycache__/
 **/__pycache__/
 tools/verify_output/
 artifacts_cache/
+assets/sfx/.norm/
+assets/sfx/.index.json

@@ -6,6 +6,7 @@ import sqlite3
 from rich.console import Console
 from rich.table import Table
 from pathlib import Path
+from typing import Optional
 from openclip_engine.core.config import (
     FFMPEG_PATH,
     FFPROBE_PATH,
@@ -134,6 +135,72 @@ def caption_video(
         cues = [{"start": float(w["start"]) - clip_start, "end": float(w["end"]) - clip_start, "text": w.get("word", w.get("text", ""))} for w in words]
         out = build_reframe_and_caption_clip(Path(video_in), Path(out_path), cues, caption_style=caption_style)
     print(json.dumps({"output": str(out), "style": caption_style}))
+
+
+@app.command(name="render-clip")
+def render_clip_cmd(
+    video_in: str,
+    words_json: str,
+    out_path: str,
+    clip_start: float = typer.Option(0.0, "--clip-start", help="Clip start in source seconds"),
+    clip_end: Optional[float] = typer.Option(None, "--clip-end", help="Clip end in source seconds"),
+    title: Optional[str] = typer.Option(None, "--title", help="Explicit main title (else LLM + fallback)"),
+    keyword: Optional[str] = typer.Option(None, "--keyword", help="Highlighted yellow keyword in title"),
+    video_aspect: str = typer.Option("4:5", "--video-aspect", help="Video window aspect: 4:5 or 3:4"),
+    fit_mode: str = typer.Option("cover", "--fit-mode", help="Window fit: cover or contain"),
+    smart_crop: bool = typer.Option(False, "--smart-crop", help="Enable 4fps OpenCV face-tracked crop"),
+    subject_pop: bool = typer.Option(False, "--subject-pop", help="Enable optional MediaPipe subject brightness pop"),
+    plain_4_5: bool = typer.Option(False, "--plain-4-5", help="Export plain 1080x1350 4:5 (blur=off, title=off)"),
+    smear_echo: bool = typer.Option(False, "--smear-echo", help="Enable horizontal echo ghosts during smear"),
+    sfx_mode: str = typer.Option("rules", "--sfx-mode", help="SFX mode: rules | llm | off"),
+    sfx_dir: Optional[str] = typer.Option(None, "--sfx-dir", help="SFX library folder (default assets/sfx)"),
+    sfx_seed: int = typer.Option(42, "--sfx-seed", help="Deterministic SFX random seed"),
+    sfx_master_db: float = typer.Option(0.0, "--sfx-master-db", help="Master SFX gain offset in dB"),
+    quality: str = typer.Option("balanced", "--quality", help="Encode quality: fast | balanced | max"),
+    jobs: str = typer.Option("auto", "--jobs", help="Parallel worker count or 'auto'"),
+):
+    """Renders a polished 9:16 vertical clip (4:5 window on blurred canvas, grade, Karaoke Pop captions, title, SFX)."""
+    from dataclasses import replace as dc_replace
+    from openclip_engine.clipping.clip_renderer import render_polished_clip
+    from openclip_engine.clipping.config_styles import (
+        DEFAULT_LAYOUT,
+        DEFAULT_SFX_CONFIG,
+        KARAOKE_POP,
+        PLAIN_4_5_LAYOUT,
+    )
+
+    words = json.loads(Path(words_json).read_text(encoding="utf-8"))
+    base_layout = PLAIN_4_5_LAYOUT if plain_4_5 else DEFAULT_LAYOUT
+    layout = dc_replace(
+        base_layout,
+        video_aspect=video_aspect,
+        fit_mode=fit_mode,
+        smart_crop=smart_crop,
+        subject_pop=subject_pop,
+        quality=quality,
+    )
+    cap_style = dc_replace(KARAOKE_POP, smear_echo=smear_echo)
+    sfx_cfg = dc_replace(
+        DEFAULT_SFX_CONFIG,
+        mode=sfx_mode,
+        seed=sfx_seed,
+        master_db=sfx_master_db,
+        **({"sfx_dir": sfx_dir} if sfx_dir else {}),
+    )
+    _, meta = render_polished_clip(
+        video_in=video_in,
+        words=words,
+        out_path=out_path,
+        clip_start=clip_start,
+        clip_end=clip_end,
+        title=title,
+        keyword=keyword,
+        layout=layout,
+        caption_style=cap_style,
+        sfx_config=sfx_cfg,
+        return_meta=True,
+    )
+    print(json.dumps(meta, indent=2))
 
 @app.command()
 def transcribe(source: str):
