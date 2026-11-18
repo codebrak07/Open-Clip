@@ -807,11 +807,13 @@ def build_framing_filter_graph(
     def _add_feather_input(w: int, h: int, fpx: int) -> str:
         nonlocal inp_cursor
         mp = _ensure_feather_mask_png(w, h, fpx, work_dir)
-        extra_inputs.extend(["-loop", "1", "-i", str(mp)])
+        # Single-frame PNG (NO -loop 1!) paired with alphamerge=eof_action=repeat so
+        # alphamerge terminates immediately when the primary video shot ends (never freezes concat!).
+        extra_inputs.extend(["-i", str(mp)])
         idx = inp_cursor
         inp_cursor += 1
         lbl = f"[fmask_{idx}]"
-        parts.append(f"[{idx}:v]format=gray{lbl}")
+        parts.append(f"[{idx}:v]format=gray,setsar=1{lbl}")
         return lbl
 
     def _single_shot_chain(p: ShotFramingPlan, inp: str, out_lbl: str) -> None:
@@ -833,7 +835,7 @@ def build_framing_filter_graph(
             raw_lbl = f"[{base_lbl}_raw]"
             parts.append(f"{inp}crop={p.crop_w}:{p.crop_h}:{p.crop_x}:{p.crop_y},scale={p.out_w}:{p.out_h},setsar=1{grade_expr},format=yuva420p{raw_lbl}")
             mask_lbl = _add_feather_input(p.out_w, p.out_h, p.feather_px)
-            parts.append(f"{raw_lbl}{mask_lbl}alphamerge{out_lbl}")
+            parts.append(f"{raw_lbl}{mask_lbl}alphamerge=eof_action=repeat{out_lbl}")
         else:
             parts.append(f"{inp}crop={p.crop_w}:{p.crop_h}:{p.crop_x}:{p.crop_y},scale={p.out_w}:{p.out_h},setsar=1{grade_expr}{out_lbl}")
 
@@ -864,14 +866,17 @@ def build_framing_filter_graph(
     for i, p in enumerate(plans):
         trimmed = f"[sh_tr_{i}]"
         framed = f"[sh_fr_{i}]"
-        parts.append(f"{in_lbls[i]}trim=start={p.start_s:.4f}:end={p.end_s:.4f},setpts=PTS-STARTPTS{trimmed}")
+        if i == n_shots - 1:
+            parts.append(f"{in_lbls[i]}trim=start={p.start_s:.4f},setpts=PTS-STARTPTS{trimmed}")
+        else:
+            parts.append(f"{in_lbls[i]}trim=start={p.start_s:.4f}:end={p.end_s:.4f},setpts=PTS-STARTPTS{trimmed}")
         if p.out_h < win_h:
             raw_lbl = f"[sh_raw_{i}]"
             feath_lbl = f"[sh_fe_{i}]"
             parts.append(f"{trimmed}crop={p.crop_w}:{p.crop_h}:{p.crop_x}:{p.crop_y},scale={p.out_w}:{p.out_h},setsar=1{grade_expr},format=yuva420p{raw_lbl}")
             mask_lbl = _add_feather_input(p.out_w, p.out_h, max(1, p.feather_px))
-            parts.append(f"{raw_lbl}{mask_lbl}alphamerge{feath_lbl}")
-            parts.append(f"{feath_lbl}pad={win_w}:{win_h}:0:{p.offset_y_in_window}:color=black@0{framed}")
+            parts.append(f"{raw_lbl}{mask_lbl}alphamerge=eof_action=repeat{feath_lbl}")
+            parts.append(f"{feath_lbl}pad={win_w}:{win_h}:0:{p.offset_y_in_window}:color=black@0,setsar=1{framed}")
         else:
             parts.append(
                 f"{trimmed}crop={p.crop_w}:{p.crop_h}:{p.crop_x}:{p.crop_y},scale={win_w}:{win_h},setsar=1{grade_expr},format=yuva420p{framed}"
