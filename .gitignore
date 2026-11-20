@@ -14,6 +14,8 @@ outputs/
 *.png
 *.jpg
 *.jpeg
+!roblox-shorts/template/textures/**
+!roblox-shorts/template/audio/**
 
 # Databases & Local Logs
 *.sqlite

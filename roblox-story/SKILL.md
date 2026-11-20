@@ -1,0 +1,84 @@
+---
+name: roblox-story
+description: Use when someone asks for a Roblox story short, an "In this town" script, a story idea or town rule for a blocky animated short, or wants a script in the style of the viral "In this town…" videos on YouTube Shorts, TikTok or Reels.
+---
+
+# Roblox story scripts ("In this town…")
+
+Writes the script for a 60–100 second story short: one strange town rule, a kid narrator, a problem only the rule can solve, and a funny last line. The method is measured from a short with 4.4 million views (431 words in 100 seconds). Copy the method, never a story: every rule, name and line is new.
+
+If the `roblox-shorts` skill is installed, it turns the finished script into the video.
+
+## The idea in one line
+
+**The rule is a tool.** The town treats the rule as a problem. The narrator is the one person who can use it to save someone, and using it costs them something they were proud of.
+
+## Step 1: the rule
+
+`In this town, every time you [say or do an everyday thing], [one strange thing you can see].`
+
+Rules about something people **say** (a word, a phrase, a kind of sentence) or a feeling they let out (a laugh) work best, because the biggest version can then be the truest thing the narrator has ever said.
+
+A rule is ready when all six are true:
+
+1. **You can see it.** It makes a thing appear: an animal, an object, weather. Feelings and powers don't count.
+2. **It's clear in 3 seconds.** One sentence, 10–20 words, the first words of the video.
+3. **It has sizes.** A small version makes a small thing, a big version makes a big thing. Say this in the second or third sentence. The ending depends on it.
+4. **The size follows honesty.** The biggest version only comes from the truest, hardest thing a person can say or do.
+5. **The town hides from it.** People have funny ways to avoid it (tape, helmets, nets, umbrellas).
+6. **The giant version is a rescue tool.** Picture the biggest version before you keep the rule: it must physically fix a danger (lift someone, light the way, put out a fire, pay a bill). Also know why the person in danger can't use the rule themselves.
+
+## Step 2: the story shape
+
+Percent of the running time. For 100 seconds, 10 % is 10 seconds.
+
+| Part | Where | What happens |
+|---|---|---|
+| Rule | 0–4 % | The rule, in one sentence. |
+| How it works | 4–11 % | What you see when it happens, then the size law: small makes small, big makes big. |
+| Funny example | 11–16 % | One person it went wrong for. A number helps. |
+| How the town copes | 16–22 % | Two quick pictures of people avoiding the rule. One of them returns in the last line. |
+| Me | 22–28 % | "And me?" The narrator is the best in town at avoiding the rule, and proud of it. This pride is what the true line will cost them. |
+| The person I love | 28–35 % | A best friend, sister or grandparent, shown through 3 small, funny, specific facts. At least 2 of them come back later, in the tries or the ending. |
+| The crisis | 35–42 % | They are in real trouble, with a number that shows normal help is not enough (a ladder too short, money too little, water run out). An adult can say it. |
+| The idea | 42–48 % | "Then I got an idea." The rule could save them, but the narrator must do the one thing they never do. |
+| Three tries | 48–62 % | Three small attempts. Each makes something a little bigger, each fails, each has a number that climbs. |
+| The true one | 62–70 % | "I was out of … Except one." The narrator says the thing they have hidden, about themselves. |
+| The giant | 70–80 % | The biggest version of the rule. It works. |
+| The catch | 80–88 % | It works too well, in a funny way (too loud, too heavy, it won't stop). |
+| The answer | 88–94 % | The loved person answers with the same rule, in one short line, so a second giant appears. The narrator does not comment on it. |
+| Last line | 94–100 % | A joke that brings back a picture from "how the town copes". Never a moral. |
+
+## Step 3: how it sounds
+
+- **A kid talking to a friend.** Present tense for the rule, the town, "me" and the loved person; past tense from the crisis on. Short sentences: most are 4–9 words; only the rule may be longer than 18.
+- **About 260 words a minute:** words = seconds × 4.3, give or take 5 % (60 s ≈ 260, 90 s ≈ 390, 100 s ≈ 430).
+- **Numbers as digits,** at least 8 of them: sizes, steps, feet, dollars, people, days. They go on screen.
+- **Speech in quotes** for the tries, the true line, the adult and the answer. Under 20 % of the words.
+- **Sound words** on the big moments: "Poof." "Thunder."
+- **The narrator's own feelings are shown, not told,** until the true line. That line and the answer are the only places someone says what they really feel.
+- **Every line can be filmed:** a person, a thing or an action in each one.
+- **Safe for kids:** nobody dies or gets hurt on screen, no swearing, the danger is weather, heights or getting lost.
+- **Never:** "little did I know", "that's when I learned", "suddenly", "in a world where", a lesson at the end, or two sentences in a row that start with the same word.
+
+## Step 4: what to give the person
+
+1. **Ten ideas** as a table: `# | In this town… | What you see | Who is in danger and why the rule can save them | The true line | Last line`. Mark your top 3 and say why: the clearest picture, a giant that really solves the danger, the funniest catch. Each idea makes a different kind of thing (an animal, weather, money, a plant, light, food, furniture, a toy, a door, a vehicle…), and none of them is one of the examples' (balloons, coins, rain).
+2. **Stop and let them pick,** or use the rule they gave you.
+3. **The script** as a table: `# | Line | Part | What we see | Words on screen`. One row per shot: 1–2 short sentences, 6–12 words, about 1.5–2.5 seconds. "Words on screen" is the number or the one key word of that row, or empty.
+4. **The title:** the rule squeezed to 6–9 words, with the visible thing in CAPS: `In This Town, Secrets Turn Into MICE`.
+5. **Checks,** listed with a tick or a cross:
+   - the rule is the first sentence and makes a visible thing
+   - the size law is said before 12 %
+   - three facts about the loved person, at least 2 used again later
+   - three tries with climbing numbers
+   - the true line is about the narrator's own feeling
+   - the giant physically solves the danger; the catch is funny; the answer makes a second giant
+   - the last line calls back to "how the town copes"
+   - the word count fits the length
+
+Then stop. The person reads and edits the script before any voice or video is made.
+
+## Examples
+
+`examples.md` has three complete scripts written with this method (balloons from laughing, coins from saying thank you, rain clouds from "I'm fine"). Read one before you write. They are printed as paragraphs to read aloud; in your table, split them into one shot per row.
