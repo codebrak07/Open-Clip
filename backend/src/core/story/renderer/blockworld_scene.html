@@ -1,0 +1,1222 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>OpenClip BlockWorld 9:16 Renderer</title>
+  <style>
+    body, html {
+      margin: 0;
+      padding: 0;
+      width: 1080px;
+      height: 1920px;
+      overflow: hidden;
+      background: #0f172a;
+    }
+    #renderCanvas {
+      width: 1080px;
+      height: 1920px;
+      display: block;
+    }
+  </style>
+</head>
+<body>
+  <div style="position: relative; width: 1080px; height: 1920px;">
+    <canvas id="renderCanvas" width="1080" height="1920" style="position: absolute; top: 0; left: 0; width: 1080px; height: 1920px; display: block;"></canvas>
+    <canvas id="overlayCanvas" width="1080" height="1920" style="position: absolute; top: 0; left: 0; width: 1080px; height: 1920px; pointer-events: none; z-index: 10;"></canvas>
+  </div>
+  <script type="module">
+    import * as THREE from './three.module.js';
+
+    let scene, camera, renderer;
+    let characters = new Map();
+    let environmentMeshes = [];
+    let catMesh = null;
+    let swarmMesh = null;
+    let smokePuffGroup = null;
+    let storyboardData = null;
+    let isFallbackMode = false;
+    let fallbackCanvas = null;
+    let fallbackCtx = null;
+    let overlayCanvas = null;
+    let overlayCtx = null;
+
+    function getRelativeLuminance(hex) {
+      if (!hex || typeof hex !== 'string') return 0.5;
+      const clean = hex.replace('#', '');
+      const num = parseInt(clean, 16);
+      const r = ((num >> 16) & 255) / 255;
+      const g = ((num >> 8) & 255) / 255;
+      const b = (num & 255) / 255;
+      const toLinear = c => (c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4));
+      return 0.2126 * toLinear(r) + 0.7152 * toLinear(g) + 0.0722 * toLinear(b);
+    }
+
+    function getContrastRatio(hex1, hex2) {
+      const l1 = getRelativeLuminance(hex1);
+      const l2 = getRelativeLuminance(hex2);
+      const brighter = Math.max(l1, l2);
+      const darker = Math.min(l1, l2);
+      return (brighter + 0.05) / (darker + 0.05);
+    }
+
+    const COLOR_MAP = {
+      skin_light: '#fcd34d',
+      skin_tan: '#d97706',
+      skin_medium: '#b45309',
+      skin_dark: '#78350f',
+      skin_roblox_yellow: '#f59e0b',
+      skin_alien_green: '#84cc16',
+      skin_pastel_blue: '#38bdf8',
+      hair_black: '#18181b',
+      hair_brown: '#713f12',
+      hair_blonde: '#facc15',
+      hair_ginger: '#ea580c',
+      hair_neon_blue: '#06b6d4',
+      hair_hot_pink: '#ec4899',
+      hair_white: '#f4f4f5',
+      color_red: '#ef4444',
+      color_blue: '#3b82f6',
+      color_green: '#22c55e',
+      color_yellow: '#eab308',
+      color_black: '#18181b',
+      color_white: '#fafafa',
+      color_purple: '#a855f7',
+      color_orange: '#f97316',
+      bottom_jeans: '#1d4ed8',
+      bottom_joggers: '#27272a',
+      bottom_cargo: '#a16207',
+      bottom_shorts: '#dc2626',
+      bottom_suit_pants: '#09090b'
+    };
+
+    function resolveColor(idOrHex, fallback) {
+      if (!idOrHex) return fallback;
+      if (COLOR_MAP[idOrHex]) return COLOR_MAP[idOrHex];
+      if (typeof idOrHex === 'string' && (idOrHex.startsWith('#') || idOrHex.startsWith('rgb'))) return idOrHex;
+      return fallback;
+    }
+
+    window.__RENDERED_FX__ = [];
+
+    window.initScene = function(data) {
+      storyboardData = data;
+      let canvas = document.getElementById('renderCanvas');
+      overlayCanvas = document.getElementById('overlayCanvas');
+      if (overlayCanvas) {
+        overlayCtx = overlayCanvas.getContext('2d');
+      }
+
+      // Try creating WebGL renderer
+      let glSupported = false;
+      try {
+        renderer = new THREE.WebGLRenderer({
+          canvas: canvas,
+          antialias: true,
+          preserveDrawingBuffer: true,
+          powerPreference: 'high-performance'
+        });
+        if (renderer && renderer.getContext()) {
+          glSupported = true;
+        }
+      } catch (err) {
+        glSupported = false;
+      }
+
+      if (glSupported) {
+        try {
+          scene = new THREE.Scene();
+          scene.background = new THREE.Color(0x0f172a);
+
+          camera = new THREE.PerspectiveCamera(48, 1080 / 1920, 0.1, 100);
+          camera.position.set(0, 3.2, 5.5);
+
+          // Calibrated sRGB color space & ACES Filmic Tone Mapping
+          renderer.setSize(1080, 1920);
+          renderer.setPixelRatio(1);
+          renderer.outputColorSpace = THREE.SRGBColorSpace;
+          renderer.toneMapping = THREE.ACESFilmicToneMapping;
+          renderer.toneMappingExposure = 1.15;
+          renderer.shadowMap.enabled = true;
+          renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+
+          buildEnvironment(data.scene || {});
+          buildCharacters(data.characters || []);
+          buildCatProp();
+          buildSmokePuffSystem();
+          buildCreatureSwarms(data);
+
+          isFallbackMode = false;
+          window.__BLOCKWORLD_READY__ = true;
+          return true;
+        } catch (err) {
+          console.warn('[BlockWorld] WebGL setup failed, switching to 2D Canvas fallback:', err);
+          isFallbackMode = true;
+        }
+      } else {
+        isFallbackMode = true;
+      }
+
+      // Fallback Mode: Recreate fresh 2D canvas so context type is never locked
+      if (canvas) canvas.remove();
+      const canvas2d = document.createElement('canvas');
+      canvas2d.id = 'renderCanvas';
+      canvas2d.width = 1080;
+      canvas2d.height = 1920;
+      document.body.appendChild(canvas2d);
+      fallbackCanvas = canvas2d;
+      fallbackCtx = canvas2d.getContext('2d');
+      isFallbackMode = true;
+      window.__BLOCKWORLD_READY__ = true;
+      return true;
+    };
+
+    function buildEnvironment(sceneSpec) {
+      if (isFallbackMode) return;
+      environmentMeshes.forEach(m => scene.remove(m));
+      environmentMeshes = [];
+
+      const locId = (sceneSpec.id || sceneSpec.location || 'sunny_town').toLowerCase();
+      let groundCol = 0x22c55e;
+      let wallCol = 0x38bdf8;
+      let skyCol = 0x38bdf8;
+      let hasSnow = false;
+      let hasTrees = false;
+      let hasCafeteriaTables = false;
+      let hasBedroomFurniture = false;
+
+      if (locId.includes('cafeteria')) {
+        groundCol = 0x64748b; // linoleum grey
+        wallCol = 0xf1f5f9;   // white tile wall
+        skyCol = 0xf1f5f9;
+        hasCafeteriaTables = true;
+      } else if (locId.includes('bedroom') || locId.includes('living_room')) {
+        groundCol = 0x78350f; // warm hardwood
+        wallCol = 0xfef3c7;   // warm beige wall
+        skyCol = 0xfef3c7;
+        hasBedroomFurniture = true;
+      } else if (locId.includes('winter') || locId.includes('storm')) {
+        groundCol = 0xe2e8f0; // snowbank white
+        wallCol = 0x93c5fd;   // icy cold blue fog
+        skyCol = 0x93c5fd;
+        hasSnow = true;
+      } else if (locId.includes('bright') || locId.includes('town') || locId.includes('sunny')) {
+        groundCol = 0x22c55e; // vivid bright green
+        wallCol = 0x38bdf8;   // sunny sky blue
+        skyCol = 0x38bdf8;
+        hasTrees = true;
+      } else if (locId.includes('gaming')) {
+        groundCol = 0x09090b;
+        wallCol = 0x18181b;
+        skyCol = 0x3b82f6;
+      }
+
+      scene.background = new THREE.Color(skyCol);
+
+      // Lighting Rig: Hemisphere + Key + Fill
+      const hemiLight = new THREE.HemisphereLight(0xffffff, groundCol, 0.85);
+      scene.add(hemiLight);
+      environmentMeshes.push(hemiLight);
+
+      const keyLight = new THREE.DirectionalLight(0xffffff, 1.35);
+      keyLight.position.set(6, 14, 8);
+      keyLight.castShadow = true;
+      keyLight.shadow.mapSize.width = 1024;
+      keyLight.shadow.mapSize.height = 1024;
+      scene.add(keyLight);
+      environmentMeshes.push(keyLight);
+
+      const fillLight = new THREE.DirectionalLight(hasSnow ? 0x93c5fd : 0xfde047, 0.45);
+      fillLight.position.set(-5, 4, 3);
+      scene.add(fillLight);
+      environmentMeshes.push(fillLight);
+
+      // Ground plane (flat baseplate)
+      const groundGeo = new THREE.PlaneGeometry(60, 60);
+      const groundMat = new THREE.MeshStandardMaterial({ color: groundCol, roughness: 0.8 });
+      const ground = new THREE.Mesh(groundGeo, groundMat);
+      ground.rotation.x = -Math.PI / 2;
+      ground.receiveShadow = true;
+      scene.add(ground);
+      environmentMeshes.push(ground);
+
+      // Back architecture / horizon wall
+      const wallGeo = new THREE.BoxGeometry(40, 18, 0.6);
+      const wallMat = new THREE.MeshStandardMaterial({ color: wallCol, roughness: 0.85 });
+      const backWall = new THREE.Mesh(wallGeo, wallMat);
+      backWall.position.set(0, 9, -6.5);
+      backWall.receiveShadow = true;
+      scene.add(backWall);
+      environmentMeshes.push(backWall);
+
+      // Procedural Scenery: Trees in sunny town
+      if (hasTrees) {
+        const treeMat = new THREE.MeshStandardMaterial({ color: 0x16a34a, roughness: 0.7 });
+        const trunkMat = new THREE.MeshStandardMaterial({ color: 0x78350f, roughness: 0.9 });
+        [-4.5, 4.5, -6.5, 6.5].forEach((tx, i) => {
+          const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.25, 0.35, 2.8, 8), trunkMat);
+          trunk.position.set(tx, 1.4, -4 + (i % 2) * 1.5);
+          trunk.castShadow = true;
+          scene.add(trunk);
+          environmentMeshes.push(trunk);
+
+          const foliage = new THREE.Mesh(new THREE.SphereGeometry(1.2, 10, 10), treeMat);
+          foliage.position.set(tx, 3.4, -4 + (i % 2) * 1.5);
+          foliage.castShadow = true;
+          scene.add(foliage);
+          environmentMeshes.push(foliage);
+        });
+      }
+
+      // Procedural Scenery: Cafeteria wooden long tables
+      if (hasCafeteriaTables) {
+        const woodMat = new THREE.MeshStandardMaterial({ color: 0xb45309, roughness: 0.7 });
+        [-3.2, 3.2].forEach(tx => {
+          const table = new THREE.Mesh(new THREE.BoxGeometry(2.4, 0.85, 1.4), woodMat);
+          table.position.set(tx, 0.42, -1.8);
+          table.castShadow = true;
+          table.receiveShadow = true;
+          scene.add(table);
+          environmentMeshes.push(table);
+        });
+      }
+
+      // Procedural Scenery: Bedroom furniture
+      if (hasBedroomFurniture) {
+        const bedFrame = new THREE.Mesh(new THREE.BoxGeometry(2.4, 0.6, 3.0), new THREE.MeshStandardMaterial({ color: 0x3b82f6, roughness: 0.8 }));
+        bedFrame.position.set(-3.2, 0.3, -2.5);
+        bedFrame.castShadow = true;
+        scene.add(bedFrame);
+        environmentMeshes.push(bedFrame);
+
+        const wardrobe = new THREE.Mesh(new THREE.BoxGeometry(1.6, 4.0, 1.0), new THREE.MeshStandardMaterial({ color: 0x78350f, roughness: 0.8 }));
+        wardrobe.position.set(3.5, 2.0, -3.5);
+        wardrobe.castShadow = true;
+        scene.add(wardrobe);
+        environmentMeshes.push(wardrobe);
+      }
+    }
+
+    function buildCatProp() {
+      if (isFallbackMode) return;
+      const catGroup = new THREE.Group();
+
+      // Orange tabby voxel cat
+      const catMat = new THREE.MeshStandardMaterial({ color: 0xf97316, roughness: 0.7 });
+      const whiteMat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.7 });
+      const eyeMat = new THREE.MeshBasicMaterial({ color: 0x16a34a }); // Green cat eyes
+
+      // Body
+      const body = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.35, 0.7), catMat);
+      body.position.set(0, 0.28, 0);
+      body.castShadow = true;
+      catGroup.add(body);
+
+      // Head
+      const head = new THREE.Mesh(new THREE.BoxGeometry(0.38, 0.32, 0.38), catMat);
+      head.position.set(0, 0.48, 0.38);
+      head.castShadow = true;
+      catGroup.add(head);
+
+      // Snout / Whiskers
+      const snout = new THREE.Mesh(new THREE.BoxGeometry(0.18, 0.12, 0.1), whiteMat);
+      snout.position.set(0, 0.42, 0.58);
+      catGroup.add(snout);
+
+      // Nose
+      const nose = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.04, 0.02), new THREE.MeshBasicMaterial({ color: 0xec4899 }));
+      nose.position.set(0, 0.44, 0.64);
+      catGroup.add(nose);
+
+      // Ears (2 pointed wedges)
+      const earLeft = new THREE.Mesh(new THREE.ConeGeometry(0.08, 0.16, 4), catMat);
+      earLeft.position.set(-0.12, 0.7, 0.36);
+      catGroup.add(earLeft);
+
+      const earRight = new THREE.Mesh(new THREE.ConeGeometry(0.08, 0.16, 4), catMat);
+      earRight.position.set(0.12, 0.7, 0.36);
+      catGroup.add(earRight);
+
+      // Eyes
+      const eyeL = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.06, 0.02), eyeMat);
+      eyeL.position.set(-0.09, 0.52, 0.58);
+      catGroup.add(eyeL);
+
+      const eyeR = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.06, 0.02), eyeMat);
+      eyeR.position.set(0.09, 0.52, 0.58);
+      catGroup.add(eyeR);
+
+      // Tail
+      const tail = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.04, 0.5), catMat);
+      tail.position.set(0, 0.45, -0.45);
+      tail.rotation.x = Math.PI / 4;
+      catGroup.add(tail);
+
+      // Position beside char_1
+      catGroup.position.set(-0.45, 0, 0.4);
+      scene.add(catGroup);
+      catMesh = catGroup;
+      environmentMeshes.push(catGroup);
+    }
+
+    function buildSmokePuffSystem() {
+      if (isFallbackMode) return;
+      smokePuffGroup = new THREE.Group();
+      const smokeMat = new THREE.MeshStandardMaterial({
+        color: 0xcccccc,
+        transparent: true,
+        opacity: 0.0,
+        roughness: 0.9,
+      });
+
+      for (let i = 0; i < 5; i++) {
+        const puff = new THREE.Mesh(new THREE.SphereGeometry(0.12 + i * 0.04, 8, 8), smokeMat.clone());
+        puff.position.set(0, 0, 0);
+        smokePuffGroup.add(puff);
+      }
+
+      smokePuffGroup.position.set(-0.45, 0.5, 1.0);
+      scene.add(smokePuffGroup);
+      environmentMeshes.push(smokePuffGroup);
+    }
+
+    function buildCreatureSwarms(data) {
+      if (isFallbackMode) return;
+      const count = 300;
+      const swarmGeo = new THREE.BoxGeometry(0.28, 0.22, 0.35);
+      const swarmMat = new THREE.MeshStandardMaterial({ color: 0x78716c, roughness: 0.6 });
+      const instancedMesh = new THREE.InstancedMesh(swarmGeo, swarmMat, count);
+      instancedMesh.castShadow = true;
+      instancedMesh.receiveShadow = true;
+
+      const dummy = new THREE.Object3D();
+      for (let i = 0; i < count; i++) {
+        const angle = (i / count) * Math.PI * 2 + (Math.random() - 0.5) * 0.4;
+        const radius = 3.5 + Math.random() * 8.0;
+        const x = Math.cos(angle) * radius;
+        const z = Math.sin(angle) * radius;
+        const y = 0.11;
+        dummy.position.set(x, y, z);
+        dummy.rotation.y = Math.random() * Math.PI * 2;
+        const s = 0.6 + Math.random() * 0.7;
+        dummy.scale.set(s, s, s);
+        dummy.updateMatrix();
+        instancedMesh.setMatrixAt(i, dummy.matrix);
+      }
+      instancedMesh.instanceMatrix.needsUpdate = true;
+      scene.add(instancedMesh);
+      swarmMesh = instancedMesh;
+      environmentMeshes.push(instancedMesh);
+    }
+
+    function createFaceCanvasTexture(expression, isMouthOpen, skinHex) {
+      const canvas = document.createElement('canvas');
+      canvas.width = 256;
+      canvas.height = 256;
+      const ctx = canvas.getContext('2d');
+
+      ctx.fillStyle = skinHex || '#fcd34d';
+      ctx.fillRect(0, 0, 256, 256);
+
+      ctx.fillStyle = '#18181b';
+      const eyeY = 110;
+      const expr = (expression || 'neutral').toLowerCase();
+
+      // Eyes rendering based on expression
+      if (expr.includes('ring') || expr.includes('shock') || expr.includes('surprised')) {
+        // Shock ring eyes (huge white circles with black border and small center pupil)
+        [-48, 48].forEach(offX => {
+          ctx.fillStyle = '#ffffff';
+          ctx.beginPath();
+          ctx.arc(128 + offX, eyeY, 26, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.lineWidth = 6;
+          ctx.strokeStyle = '#18181b';
+          ctx.stroke();
+
+          ctx.fillStyle = '#18181b';
+          ctx.beginPath();
+          ctx.arc(128 + offX, eyeY, 8, 0, Math.PI * 2);
+          ctx.fill();
+        });
+      } else if (expr.includes('star') || expr.includes('crying') || expr.includes('tear')) {
+        // Star eyes with cyan tears
+        [-48, 48].forEach(offX => {
+          ctx.fillStyle = '#38bdf8';
+          ctx.beginPath();
+          ctx.arc(128 + offX, eyeY + 28, 12, 0, Math.PI * 2); // tear
+          ctx.fill();
+
+          ctx.fillStyle = '#18181b';
+          ctx.beginPath();
+          ctx.arc(128 + offX, eyeY, 14, 0, Math.PI * 2);
+          ctx.fill();
+        });
+      } else if (expr.includes('faint') || expr.includes('x_eyes') || expr.includes('dead')) {
+        // X eyes
+        ctx.strokeStyle = '#18181b';
+        ctx.lineWidth = 8;
+        [-48, 48].forEach(offX => {
+          ctx.beginPath();
+          ctx.moveTo(128 + offX - 14, eyeY - 14); ctx.lineTo(128 + offX + 14, eyeY + 14);
+          ctx.moveTo(128 + offX + 14, eyeY - 14); ctx.lineTo(128 + offX - 14, eyeY + 14);
+          ctx.stroke();
+        });
+      } else if (expr.includes('smug') || expr.includes('smirk')) {
+        // Half closed smug eyes
+        [-48, 48].forEach(offX => {
+          ctx.beginPath();
+          ctx.arc(128 + offX, eyeY, 14, 0, Math.PI);
+          ctx.fill();
+        });
+      } else {
+        // Classic dot eyes
+        [-48, 48].forEach(offX => {
+          ctx.beginPath();
+          ctx.arc(128 + offX, eyeY, 14, 0, Math.PI * 2);
+          ctx.fill();
+        });
+      }
+
+      // Eyebrows
+      ctx.strokeStyle = '#18181b';
+      ctx.lineWidth = 7;
+      ctx.beginPath();
+      if (expr.includes('angry')) {
+        ctx.moveTo(65, eyeY - 26); ctx.lineTo(95, eyeY - 14);
+        ctx.moveTo(191, eyeY - 26); ctx.lineTo(161, eyeY - 14);
+      } else if (expr.includes('scared') || expr.includes('shock')) {
+        ctx.moveTo(65, eyeY - 16); ctx.lineTo(95, eyeY - 28);
+        ctx.moveTo(191, eyeY - 16); ctx.lineTo(161, eyeY - 28);
+      } else if (expr.includes('smug')) {
+        ctx.moveTo(65, eyeY - 24); ctx.lineTo(95, eyeY - 16);
+        ctx.moveTo(161, eyeY - 20); ctx.lineTo(191, eyeY - 20);
+      } else {
+        ctx.moveTo(65, eyeY - 20); ctx.lineTo(95, eyeY - 20);
+        ctx.moveTo(161, eyeY - 20); ctx.lineTo(191, eyeY - 20);
+      }
+      ctx.stroke();
+
+      // Mouth rendering
+      ctx.beginPath();
+      if (isMouthOpen) {
+        ctx.fillStyle = '#dc2626';
+        ctx.ellipse(128, 175, 26, 20, 0, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.strokeStyle = '#18181b';
+        ctx.lineWidth = 6;
+        ctx.stroke();
+      } else if (expr.includes('scream')) {
+        ctx.fillStyle = '#dc2626';
+        ctx.ellipse(128, 175, 30, 26, 0, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.strokeStyle = '#18181b';
+        ctx.lineWidth = 7;
+        ctx.stroke();
+      } else if (expr.includes('smug') || expr.includes('smirk')) {
+        ctx.lineWidth = 7;
+        ctx.strokeStyle = '#18181b';
+        ctx.beginPath();
+        ctx.moveTo(108, 170);
+        ctx.quadraticCurveTo(135, 182, 155, 158);
+        ctx.stroke();
+      } else if (expr.includes('flat') || expr.includes('deadpan')) {
+        ctx.lineWidth = 7;
+        ctx.strokeStyle = '#18181b';
+        ctx.beginPath();
+        ctx.moveTo(108, 168); ctx.lineTo(148, 168);
+        ctx.stroke();
+      } else if (expr.includes('tongue')) {
+        ctx.lineWidth = 7;
+        ctx.arc(128, 160, 22, 0.1 * Math.PI, 0.9 * Math.PI);
+        ctx.stroke();
+        ctx.fillStyle = '#f472b6';
+        ctx.beginPath();
+        ctx.ellipse(135, 178, 12, 10, 0, 0, Math.PI * 2);
+        ctx.fill();
+      } else {
+        // Default clean smile
+        ctx.lineWidth = 7;
+        ctx.arc(128, 160, 24, 0.15 * Math.PI, 0.85 * Math.PI);
+        ctx.stroke();
+      }
+
+      const texture = new THREE.CanvasTexture(canvas);
+      texture.colorSpace = THREE.SRGBColorSpace;
+      return texture;
+    }
+
+    function createOutfitCanvasTexture(styleId, baseHex, accentHex) {
+      const canvas = document.createElement('canvas');
+      canvas.width = 256;
+      canvas.height = 256;
+      const ctx = canvas.getContext('2d');
+
+      const base = baseHex || '#3b82f6';
+      const accent = accentHex || '#facc15';
+      const style = (styleId || 'top_hoodie').toLowerCase();
+
+      ctx.fillStyle = base;
+      ctx.fillRect(0, 0, 256, 256);
+
+      if (style.includes('plaid')) {
+        ctx.fillStyle = accent;
+        ctx.globalAlpha = 0.35;
+        for (let x = 0; x < 256; x += 32) ctx.fillRect(x, 0, 14, 256);
+        for (let y = 0; y < 256; y += 32) ctx.fillRect(0, y, 256, 14);
+        ctx.globalAlpha = 1.0;
+      } else if (style.includes('striped') || style.includes('stripes')) {
+        ctx.fillStyle = '#ffffff';
+        for (let y = 0; y < 256; y += 40) ctx.fillRect(0, y, 256, 18);
+      } else if (style.includes('star')) {
+        // Big golden star emblem
+        ctx.fillStyle = '#facc15';
+        ctx.beginPath();
+        ctx.arc(128, 128, 36, 0, Math.PI * 2);
+        ctx.fill();
+      } else if (style.includes('hoodie')) {
+        // Kangaroo pocket
+        ctx.fillStyle = 'rgba(0, 0, 0, 0.15)';
+        ctx.beginPath();
+        ctx.roundRect(48, 150, 160, 80, 16);
+        ctx.fill();
+      } else if (style.includes('jeans')) {
+        // Double stitch seams
+        ctx.strokeStyle = '#ca8a04';
+        ctx.lineWidth = 4;
+        ctx.strokeRect(18, 18, 220, 220);
+      }
+
+      const tex = new THREE.CanvasTexture(canvas);
+      tex.colorSpace = THREE.SRGBColorSpace;
+      return tex;
+    }
+
+    function createStatusTagTexture(text, tierColor, isConcealed) {
+      const canvas = document.createElement('canvas');
+      canvas.width = 256;
+      canvas.height = 80;
+      const ctx = canvas.getContext('2d');
+      ctx.clearRect(0, 0, 256, 80);
+
+      const r = 24;
+      const col = isConcealed ? '#52525b' : (tierColor || '#f59e0b');
+      ctx.fillStyle = col;
+      ctx.beginPath();
+      ctx.roundRect(16, 8, 224, 64, r);
+      ctx.fill();
+
+      ctx.lineWidth = 4;
+      ctx.strokeStyle = '#ffffff';
+      ctx.stroke();
+
+      ctx.fillStyle = '#ffffff';
+      ctx.font = 'bold 30px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      const displayText = isConcealed ? '???' : (text || 'AIR 1');
+      ctx.fillText(displayText, 128, 40);
+
+      const tex = new THREE.CanvasTexture(canvas);
+      tex.colorSpace = THREE.SRGBColorSpace;
+      return tex;
+    }
+
+    function buildCharacters(charList) {
+      if (isFallbackMode) return;
+      characters.forEach(c => scene.remove(c.rootGroup));
+      characters.clear();
+
+      const numChars = charList.length || 1;
+      charList.forEach((spec, idx) => {
+        const root = new THREE.Group();
+        if (spec.scale === 10 || spec.isHuge || spec.scale === 'huge') {
+          root.scale.set(10, 10, 10);
+        }
+
+        // Staging: Position characters side by side or using solver staging
+        const xPos = spec.staging?.worldX !== undefined ? spec.staging.worldX : (numChars === 1 ? 0 : (idx === 0 ? -1.15 : 1.15));
+        const yBase = spec.staging?.worldY !== undefined ? spec.staging.worldY : 0;
+        root.position.set(xPos, yBase, spec.staging?.worldZ || 0);
+
+        // Staging platform if elevated or sunken
+        if (Math.abs(yBase) > 0.05) {
+          const platHeight = Math.abs(yBase);
+          const platGeo = new THREE.CylinderGeometry(1.4, 1.6, platHeight, 16);
+          const platMat = new THREE.MeshStandardMaterial({
+            color: yBase > 0 ? 0xf59e0b : 0x3f3f46,
+            roughness: 0.6,
+          });
+          const platMesh = new THREE.Mesh(platGeo, platMat);
+          platMesh.position.set(xPos, yBase / 2, spec.staging?.worldZ || 0);
+          platMesh.receiveShadow = true;
+          scene.add(platMesh);
+          environmentMeshes.push(platMesh);
+        }
+
+        let skinHex = resolveColor(spec.look?.skin, idx === 0 ? '#fcd34d' : '#d97706');
+        let topCol = resolveColor(spec.look?.top?.color, idx === 0 ? '#ef4444' : '#22c55e');
+        // Relative Luminance check: Guarantee >= 3.0:1 contrast against dark background
+        if (getContrastRatio(topCol, '#0f172a') < 3.0) {
+          topCol = '#facc15';
+        }
+        const skinMat = new THREE.MeshStandardMaterial({ color: new THREE.Color(skinHex), roughness: 0.6 });
+
+        // Head (1.2 x 1.2 x 1.2)
+        const headGeo = new THREE.BoxGeometry(1.2, 1.2, 1.2);
+        const faceTex = createFaceCanvasTexture('neutral', false, skinHex);
+        const headMaterials = [
+          skinMat, skinMat, skinMat, skinMat,
+          new THREE.MeshStandardMaterial({ map: faceTex, roughness: 0.6 }), // Front face
+          skinMat
+        ];
+        const headMesh = new THREE.Mesh(headGeo, headMaterials);
+        headMesh.position.set(0, 3.4, 0);
+        headMesh.castShadow = true;
+        root.add(headMesh);
+
+        // Hair Mesh (custom kits: messy, curly, cap, bald)
+        const hairStyle = (spec.look?.hair?.style || 'hair_short_messy').toLowerCase();
+        const hairCol = resolveColor(spec.look?.hair?.color, idx === 0 ? '#18181b' : '#713f12');
+        const hairMat = new THREE.MeshStandardMaterial({ color: new THREE.Color(hairCol), roughness: 0.8 });
+        const hairGroup = new THREE.Group();
+
+        if (hairStyle.includes('bald')) {
+          // Bald: no extra hair mesh
+        } else if (hairStyle.includes('curly') || hairStyle.includes('afro')) {
+          // Curly afro: cluster of mini spheres
+          [-0.4, 0, 0.4].forEach(hx => {
+            const hSphere = new THREE.Mesh(new THREE.SphereGeometry(0.42, 8, 8), hairMat);
+            hSphere.position.set(hx, 4.15, 0);
+            hSphere.castShadow = true;
+            hairGroup.add(hSphere);
+          });
+        } else if (hairStyle.includes('cap')) {
+          // Baseball cap with forward bill
+          const capBox = new THREE.Mesh(new THREE.BoxGeometry(1.28, 0.35, 1.28), hairMat);
+          capBox.position.set(0, 4.05, 0);
+          hairGroup.add(capBox);
+          const bill = new THREE.Mesh(new THREE.BoxGeometry(1.1, 0.08, 0.6), hairMat);
+          bill.position.set(0, 3.9, 0.75);
+          hairGroup.add(bill);
+        } else {
+          // Classic blocky messy hair
+          const hairMesh = new THREE.Mesh(new THREE.BoxGeometry(1.26, 0.42, 1.26), hairMat);
+          hairMesh.position.set(0, 4.05, 0);
+          hairMesh.castShadow = true;
+          hairGroup.add(hairMesh);
+        }
+        root.add(hairGroup);
+
+        // Torso with procedural outfit texture
+        const topTex = createOutfitCanvasTexture(spec.look?.top?.style, topCol, '#facc15');
+        const torsoMat = new THREE.MeshStandardMaterial({ map: topTex, roughness: 0.7 });
+        const torsoMesh = new THREE.Mesh(new THREE.BoxGeometry(2.0, 2.0, 1.0), torsoMat);
+        torsoMesh.position.set(0, 2.0, 0);
+        torsoMesh.castShadow = true;
+        torsoMesh.receiveShadow = true;
+        root.add(torsoMesh);
+
+        // Arms (0.8 x 2.0 x 0.8 each)
+        const leftArm = new THREE.Mesh(new THREE.BoxGeometry(0.8, 2.0, 0.8), torsoMat);
+        leftArm.position.set(-1.45, 2.0, 0);
+        leftArm.castShadow = true;
+        root.add(leftArm);
+
+        const rightArm = new THREE.Mesh(new THREE.BoxGeometry(0.8, 2.0, 0.8), torsoMat);
+        rightArm.position.set(1.45, 2.0, 0);
+        rightArm.castShadow = true;
+        root.add(rightArm);
+
+        // Legs with denim / pants texture
+        const botCol = resolveColor(spec.look?.bottom?.style || spec.look?.bottom?.color, idx === 0 ? '#1d4ed8' : '#27272a');
+        const legTex = createOutfitCanvasTexture(spec.look?.bottom?.style, botCol, '#ca8a04');
+        const legMat = new THREE.MeshStandardMaterial({ map: legTex, roughness: 0.8 });
+        const leftLeg = new THREE.Mesh(new THREE.BoxGeometry(0.9, 2.0, 0.9), legMat);
+        leftLeg.position.set(-0.55, 0.0, 0);
+        leftLeg.castShadow = true;
+        root.add(leftLeg);
+
+        const rightLeg = new THREE.Mesh(new THREE.BoxGeometry(0.9, 2.0, 0.9), legMat);
+        rightLeg.position.set(0.55, 0.0, 0);
+        rightLeg.castShadow = true;
+        root.add(rightLeg);
+
+        // Concealer Mesh (e.g. paper bag, cardboard box, or cashmere scarf)
+        if (spec.concealer && spec.concealer !== 'conceal_none') {
+          if (spec.concealer.includes('bag') || spec.concealer.includes('box')) {
+            const bagGeo = new THREE.BoxGeometry(1.36, 1.4, 1.36);
+            const bagMat = new THREE.MeshStandardMaterial({ color: 0xb45309, roughness: 0.9 });
+            const bagMesh = new THREE.Mesh(bagGeo, bagMat);
+            bagMesh.position.set(0, 3.4, 0);
+            bagMesh.castShadow = true;
+            root.add(bagMesh);
+          } else if (spec.concealer.includes('scarf')) {
+            const scarfGeo = new THREE.TorusGeometry(0.8, 0.25, 8, 16);
+            const scarfMat = new THREE.MeshStandardMaterial({ color: 0x94a3b8, roughness: 0.8 });
+            const scarfMesh = new THREE.Mesh(scarfGeo, scarfMat);
+            scarfMesh.rotation.x = Math.PI / 2;
+            scarfMesh.position.set(0, 3.0, 0);
+            scarfMesh.castShadow = true;
+            root.add(scarfMesh);
+          }
+        }
+
+        // StatusTag Billboard plate (positioned 0.45m above head: y = 4.8)
+        if (spec.status || spec.tier || spec.statusValue !== undefined || spec.rankTier) {
+          const isConcealed = Boolean(spec.concealed || (spec.concealer && spec.concealer !== 'conceal_none'));
+          const displayText = isConcealed ? '???' : (spec.statusDisplay || spec.status || spec.rankTier || 'AIR 1');
+          const tierCol = spec.tierColor || '#f59e0b';
+          const tagTex = createStatusTagTexture(displayText, tierCol, isConcealed);
+          const tagMat = new THREE.SpriteMaterial({ map: tagTex, transparent: true });
+          const tagSprite = new THREE.Sprite(tagMat);
+          tagSprite.scale.set(1.4, 0.45, 1);
+          tagSprite.position.set(0, 4.8, 0);
+          root.add(tagSprite);
+        }
+
+        scene.add(root);
+        characters.set(spec.id, {
+          rootGroup: root,
+          headMesh,
+          headMaterials,
+          torsoMesh,
+          leftArm,
+          rightArm,
+          leftLeg,
+          rightLeg,
+          skinCol: skinHex,
+          isMouthOpen: false,
+          currentExpression: 'neutral',
+          lastExpr: 'neutral',
+          initialX: xPos,
+        });
+      });
+    }
+
+    function animateCharacter(charObj, anim, t, isSpeaker) {
+      if (isFallbackMode) return;
+      // Idle breathing sway
+      charObj.rootGroup.position.y = Math.sin(t * 3.5) * 0.03;
+
+      // Reset base transforms
+      charObj.rootGroup.rotation.set(0, 0, 0);
+      charObj.rootGroup.position.x = charObj.initialX !== undefined ? charObj.initialX : 0;
+      charObj.rootGroup.position.y = Math.sin(t * 3.5) * 0.03; // breathing baseline
+
+      const a = (anim || 'idle').toLowerCase();
+
+      if (a === 'celebrate') {
+        charObj.rootGroup.position.y += Math.abs(Math.sin(t * 10)) * 0.45;
+        charObj.leftArm.rotation.set(-Math.PI * 0.85, 0, 0.2);
+        charObj.rightArm.rotation.set(-Math.PI * 0.85, 0, -0.2);
+      } else if (a === 'walk') {
+        charObj.leftLeg.rotation.x = Math.sin(t * 8) * 0.55;
+        charObj.rightLeg.rotation.x = -Math.sin(t * 8) * 0.55;
+        charObj.leftArm.rotation.x = -Math.sin(t * 8) * 0.55;
+        charObj.rightArm.rotation.x = Math.sin(t * 8) * 0.55;
+      } else if (a === 'run') {
+        charObj.leftLeg.rotation.x = Math.sin(t * 14) * 0.9;
+        charObj.rightLeg.rotation.x = -Math.sin(t * 14) * 0.9;
+        charObj.leftArm.rotation.x = -Math.sin(t * 14) * 0.9;
+        charObj.rightArm.rotation.x = Math.sin(t * 14) * 0.9;
+        charObj.rootGroup.position.y += Math.abs(Math.sin(t * 14)) * 0.25;
+      } else if (a === 'jump') {
+        charObj.rootGroup.position.y += Math.abs(Math.sin(t * 7)) * 0.8;
+        charObj.leftArm.rotation.x = -Math.PI * 0.8;
+        charObj.rightArm.rotation.x = -Math.PI * 0.8;
+      } else if (a === 'faint') {
+        charObj.rootGroup.rotation.z = Math.PI / 2;
+        charObj.rootGroup.position.y = -1.2;
+      } else if (a === 'fall_down') {
+        charObj.rootGroup.rotation.x = -Math.PI / 2;
+        charObj.rootGroup.position.y = -1.2;
+      } else if (a === 'shiver') {
+        charObj.rootGroup.position.x += Math.sin(t * 38) * 0.06;
+        charObj.leftArm.rotation.z = 0.3;
+        charObj.rightArm.rotation.z = -0.3;
+      } else if (a === 'flail') {
+        charObj.leftArm.rotation.x = Math.sin(t * 18) * 1.5;
+        charObj.rightArm.rotation.x = -Math.sin(t * 18) * 1.5;
+        charObj.rootGroup.position.y += Math.abs(Math.sin(t * 12)) * 0.2;
+      } else if (a === 'point') {
+        charObj.rightArm.rotation.set(-Math.PI / 2, 0, 0);
+        charObj.leftArm.rotation.set(0, 0, 0);
+      } else if (a === 'shrug') {
+        charObj.leftArm.rotation.set(0, 0, 0.5);
+        charObj.rightArm.rotation.set(0, 0, -0.5);
+      } else if (a.includes('wave')) {
+        charObj.rightArm.rotation.set(-Math.PI * 0.7, 0, -0.4 + Math.sin(t * 10) * 0.4);
+        charObj.leftArm.rotation.set(0, 0, 0);
+      } else if (a === 'sit') {
+        charObj.leftLeg.rotation.x = -Math.PI / 2;
+        charObj.rightLeg.rotation.x = -Math.PI / 2;
+        charObj.rootGroup.position.y = -0.8;
+      } else if (a === 'sleep') {
+        charObj.rootGroup.rotation.x = -Math.PI / 2;
+        charObj.rootGroup.position.y = 0.2;
+      } else if (a === 'bow') {
+        charObj.rootGroup.rotation.x = Math.PI / 6;
+      } else if (a === 'tiptoe') {
+        charObj.rootGroup.position.y += Math.abs(Math.sin(t * 6)) * 0.15;
+        charObj.leftLeg.rotation.x = Math.sin(t * 6) * 0.25;
+        charObj.rightLeg.rotation.x = -Math.sin(t * 6) * 0.25;
+      } else if (isSpeaker) {
+        // Conversational gesture
+        charObj.rightArm.rotation.x = -Math.PI * 0.4 + Math.sin(t * 12) * 0.25;
+        charObj.leftArm.rotation.x = 0;
+      } else {
+        charObj.leftArm.rotation.set(0, 0, 0);
+        charObj.rightArm.rotation.set(0, 0, 0);
+        charObj.leftLeg.rotation.set(0, 0, 0);
+        charObj.rightLeg.rotation.set(0, 0, 0);
+      }
+
+      // Real audio envelope-driven mouth flap: strictly speaking character opens mouth ONLY during active word utterances
+      const isWordActive = currentBeat?.words?.some(w => t >= w.start && t <= w.end) || false;
+      const mouthOpen = isSpeaker && isWordActive && (Math.sin(t * 24) > -0.25);
+      if (mouthOpen !== charObj.isMouthOpen || charObj.currentExpression !== charObj.lastExpr) {
+        charObj.isMouthOpen = mouthOpen;
+        charObj.lastExpr = charObj.currentExpression;
+        charObj.headMaterials[4].map = createFaceCanvasTexture(
+          charObj.currentExpression,
+          mouthOpen,
+          charObj.skinCol
+        );
+        charObj.headMaterials[4].map.needsUpdate = true;
+      }
+    }
+
+    // --- Render Captions Directly in Canvas Buffer (Guaranteed 100% Subtitle Burn-In) ---
+    function renderInCanvasCaptions(ctx, currentBeat, t) {
+      if (!currentBeat || !currentBeat.words || currentBeat.words.length === 0) return;
+
+      const words = currentBeat.words;
+      // Only display if t is within the active beat/card span
+      if (t < words[0].start || t > (words[words.length - 1].end + 0.35)) return;
+
+      // Find active word
+      const activeIdx = words.findIndex(w => t >= w.start && t <= w.end);
+
+      // Top-third vertical placement: safe margin ~16.6% from top (12%-20% safe band)
+      const topY = 320;
+      const w = 1080;
+
+      // Group words into card of 2-4 words around active word
+      const centerIdx = activeIdx >= 0 ? activeIdx : 0;
+      const cardStart = Math.max(0, Math.floor(centerIdx / 3) * 3);
+      const cardWords = words.slice(cardStart, Math.min(words.length, cardStart + 3));
+
+      // Select ONE key word per card in ALL CAPS (emphasis word or longest word)
+      let capsIdx = cardWords.findIndex(w => currentBeat.emphasisWords && currentBeat.emphasisWords.includes(w.word.toLowerCase()));
+      if (capsIdx < 0) {
+        let maxLen = 0;
+        capsIdx = 0;
+        cardWords.forEach((wObj, idx) => {
+          const l = wObj.word.replace(/[^\w]/g, '').length;
+          if (l > maxLen) { maxLen = l; capsIdx = idx; }
+        });
+      }
+
+      const displayItems = cardWords.map((wObj, idx) => {
+        const clean = wObj.word.replace(/[{}\\]/g, '');
+        const displayWord = (idx === capsIdx) ? clean.toUpperCase() : clean.toLowerCase();
+        return { ...wObj, displayWord, isActive: (cardStart + idx === activeIdx) };
+      });
+
+      ctx.save();
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.font = '900 62px "Arial Rounded MT Bold", Arial, sans-serif';
+
+      // Measure total line width to center
+      let totalWidth = 0;
+      displayItems.forEach(item => {
+        totalWidth += ctx.measureText(item.displayWord + ' ').width;
+      });
+
+      let curX = (w - totalWidth) / 2;
+
+      // Reference Caps: Strong soft shadow and outline, NO BACKGROUND BOX
+      ctx.shadowColor = 'rgba(0, 0, 0, 0.75)';
+      ctx.shadowBlur = 10;
+      ctx.shadowOffsetX = 3;
+      ctx.shadowOffsetY = 4;
+
+      displayItems.forEach(item => {
+        const wordText = item.displayWord;
+        const wordWidth = ctx.measureText(wordText + ' ').width;
+        const posX = curX + wordWidth / 2;
+
+        ctx.lineWidth = 11;
+        ctx.strokeStyle = '#000000';
+        ctx.strokeText(wordText, posX, topY);
+
+        ctx.fillStyle = '#ffffff'; // Pure crisp white text per reference standard
+        ctx.fillText(wordText, posX, topY);
+
+        curX += wordWidth;
+      });
+      ctx.restore();
+    }
+
+    // --- 2D Fallback Renderer for Headless Environments ---
+    function render2DFallback(t) {
+      const ctx = fallbackCtx;
+      const w = 1080;
+      const h = 1920;
+
+      // 1. Backdrop / Sky Gradient
+      const grad = ctx.createLinearGradient(0, 0, 0, h);
+      grad.addColorStop(0, '#0f172a');
+      grad.addColorStop(0.65, '#1e293b');
+      grad.addColorStop(1, '#09090b');
+      ctx.fillStyle = grad;
+      ctx.fillRect(0, 0, w, h);
+
+      // 2. Ground plane + Swarm representation
+      ctx.fillStyle = '#334155';
+      ctx.fillRect(0, h * 0.72, w, h * 0.28);
+      ctx.strokeStyle = '#64748b';
+      ctx.lineWidth = 6;
+      ctx.strokeRect(0, h * 0.72, w, h * 0.28);
+
+      ctx.fillStyle = '#475569';
+      for (let i = 0; i < 30; i++) {
+        const swX = (i * 37 + t * 25) % w;
+        const swY = h * 0.73 + ((i * 13) % 240);
+        ctx.fillRect(swX, swY, 12, 10);
+      }
+
+      const beats = storyboardData?.alignedBeats || [];
+      const currentBeat = beats.find(b => t >= b.startSec && t <= b.endSec) || (beats.length > 0 && t <= beats[beats.length - 1].endSec ? beats.find(b => t >= b.startSec && t <= b.endSec + 0.25) : null);
+
+      // 3. Characters Rendering
+      const chars = storyboardData?.characters || [{ id: 'char_1', name: 'Hero' }, { id: 'char_2', name: 'Friend' }];
+      chars.forEach((c, idx) => {
+        const isSpeaker = currentBeat && (c.id === currentBeat.speaker);
+        const action = currentBeat?.actions?.find(a => a.actor === c.id) || { anim: 'idle', expression: 'neutral' };
+
+        const centerX = chars.length === 1 ? w * 0.5 : (idx === 0 ? w * 0.36 : w * 0.64);
+        let baseY = h * 0.72;
+
+        if (action.anim === 'celebrate') {
+          baseY -= Math.abs(Math.sin(t * 10)) * 60;
+        } else if (action.anim === 'walk') {
+          baseY -= Math.abs(Math.sin(t * 8)) * 20;
+        }
+
+        // Legs (70w x 200h)
+        ctx.fillStyle = idx === 0 ? '#1d4ed8' : '#27272a';
+        ctx.fillRect(centerX - 80, baseY - 200, 70, 200);
+        ctx.fillRect(centerX + 10, baseY - 200, 70, 200);
+        ctx.strokeStyle = '#0f172a';
+        ctx.lineWidth = 6;
+        ctx.strokeRect(centerX - 80, baseY - 200, 70, 200);
+        ctx.strokeRect(centerX + 10, baseY - 200, 70, 200);
+
+        // Torso (180w x 220h)
+        ctx.fillStyle = idx === 0 ? '#ef4444' : '#22c55e';
+        ctx.fillRect(centerX - 90, baseY - 420, 180, 220);
+        ctx.strokeRect(centerX - 90, baseY - 420, 180, 220);
+
+        // Arms (60w x 200h)
+        const leftArmY = (action.anim === 'celebrate') ? baseY - 560 : baseY - 410;
+        const rightArmY = (action.anim === 'celebrate') ? baseY - 560 : (isSpeaker ? baseY - 450 : baseY - 410);
+        ctx.fillRect(centerX - 160, leftArmY, 60, 200);
+        ctx.fillRect(centerX + 100, rightArmY, 60, 200);
+        ctx.strokeRect(centerX - 160, leftArmY, 60, 200);
+        ctx.strokeRect(centerX + 100, rightArmY, 60, 200);
+
+        // Head (140w x 140h)
+        ctx.fillStyle = c.look?.skin || (idx === 0 ? '#fcd34d' : '#d97706');
+        ctx.fillRect(centerX - 70, baseY - 570, 140, 140);
+        ctx.strokeRect(centerX - 70, baseY - 570, 140, 140);
+
+        // Hair
+        ctx.fillStyle = c.look?.hair?.color || (idx === 0 ? '#18181b' : '#713f12');
+        ctx.fillRect(centerX - 74, baseY - 590, 148, 40);
+
+        // Eyes
+        ctx.fillStyle = '#18181b';
+        ctx.beginPath();
+        ctx.arc(centerX - 28, baseY - 510, 12, 0, Math.PI * 2);
+        ctx.arc(centerX + 28, baseY - 510, 12, 0, Math.PI * 2);
+        ctx.fill();
+
+        // Mouth flap: ONLY speaking character moves mouth strictly during active words
+        const isWordActive = currentBeat?.words?.some(w => t >= w.start && t <= w.end) || false;
+        const mouthOpen = isSpeaker && isWordActive && (Math.sin(t * 22) > -0.25);
+        ctx.fillStyle = mouthOpen ? '#dc2626' : '#18181b';
+        ctx.beginPath();
+        if (mouthOpen) {
+          ctx.ellipse(centerX, baseY - 470, 16, 12, 0, 0, Math.PI * 2);
+          ctx.fill();
+        } else {
+          ctx.strokeStyle = '#18181b';
+          ctx.lineWidth = 6;
+          ctx.arc(centerX, baseY - 480, 18, 0.1 * Math.PI, 0.9 * Math.PI);
+          ctx.stroke();
+        }
+
+        // Name Tag
+        ctx.fillStyle = '#ffffff';
+        ctx.font = 'bold 34px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText(c.name || 'Hero', centerX, baseY - 615);
+
+        // Status Tag (Satire plate above head in 2D)
+        if (c.status || c.tier || c.statusValue !== undefined || c.rankTier) {
+          const isConcealed = Boolean(c.concealed || (c.concealer && c.concealer !== 'conceal_none'));
+          const tagText = isConcealed ? '???' : (c.statusDisplay || c.status || c.rankTier || 'AIR 1');
+          const tierCol = c.tierColor || '#f59e0b';
+          const tagW = Math.max(120, tagText.length * 20 + 40);
+          ctx.fillStyle = isConcealed ? '#52525b' : tierCol;
+          ctx.beginPath();
+          ctx.roundRect(centerX - tagW / 2, baseY - 685, tagW, 44, 16);
+          ctx.fill();
+          ctx.strokeStyle = '#ffffff';
+          ctx.lineWidth = 3;
+          ctx.stroke();
+          ctx.fillStyle = '#ffffff';
+          ctx.font = 'bold 24px sans-serif';
+          ctx.fillText(tagText, centerX, baseY - 655);
+        }
+      });
+
+      // 4. Cat Voxel Prop in 2D
+      const catX = w * 0.22;
+      const catY = h * 0.72;
+      ctx.fillStyle = '#f97316'; // Orange tabby
+      ctx.fillRect(catX - 40, catY - 70, 80, 50); // body
+      ctx.fillRect(catX + 20, catY - 110, 50, 45); // head
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(catX + 50, catY - 95, 20, 20); // snout
+      // Ears
+      ctx.fillStyle = '#ea580c';
+      ctx.beginPath();
+      ctx.moveTo(catX + 25, catY - 110); ctx.lineTo(catX + 35, catY - 135); ctx.lineTo(catX + 45, catY - 110);
+      ctx.moveTo(catX + 50, catY - 110); ctx.lineTo(catX + 60, catY - 135); ctx.lineTo(catX + 70, catY - 110);
+      ctx.fill();
+
+      // 5. Smoke Puff FX (when lie event occurs)
+      const hasSmoke = currentBeat?.fx?.some(f => f.type.includes('smoke') || f.type.includes('puff')) ||
+                       currentBeat?.text?.toLowerCase().includes('lie');
+      if (hasSmoke) {
+        if (!window.__RENDERED_FX__.includes('puff_smoke')) {
+          window.__RENDERED_FX__.push('puff_smoke');
+        }
+        const puffRadius = 30 + Math.abs(Math.sin(t * 8)) * 40;
+        ctx.fillStyle = 'rgba(200, 200, 210, 0.7)';
+        ctx.beginPath();
+        ctx.arc(catX + 80, catY - 120 - (t % 2) * 40, puffRadius, 0, Math.PI * 2);
+        ctx.arc(catX + 110, catY - 140 - (t % 2) * 50, puffRadius * 0.8, 0, Math.PI * 2);
+        ctx.arc(catX + 90, catY - 160 - (t % 2) * 60, puffRadius * 0.6, 0, Math.PI * 2);
+        ctx.fill();
+      }
+
+      // 6. In-Canvas Captions
+      renderInCanvasCaptions(ctx, currentBeat, t);
+    }
+
+    window.renderAt = function(t) {
+      if (isFallbackMode) {
+        render2DFallback(t);
+        return Promise.resolve(true);
+      }
+
+      if (!storyboardData) return Promise.resolve(true);
+
+      const beats = storyboardData.alignedBeats || [];
+      const currentBeat = beats.find(b => t >= b.startSec && t <= b.endSec) || (beats.length > 0 && t <= beats[beats.length - 1].endSec ? beats.find(b => t >= b.startSec && t <= b.endSec + 0.25) : null);
+
+      if (currentBeat) {
+        const shot = currentBeat.shot || { type: 'medium', move: 'static', target: currentBeat.speaker };
+        const targetChar = characters.get(shot.target) || characters.get(currentBeat.speaker);
+        const targetPos = targetChar ? targetChar.rootGroup.position : new THREE.Vector3(0, 2.5, 0);
+
+        let camDist = 4.5;
+        let camHeight = 3.0;
+
+        if (shot.type === 'close_up') {
+          camDist = 2.8;
+          camHeight = 3.4;
+        } else if (shot.type === 'extreme_close_up') {
+          camDist = 1.8;
+          camHeight = 3.3;
+        } else if (shot.type === 'wide') {
+          camDist = 6.8;
+          camHeight = 3.2;
+        }
+
+        const beatProgress = currentBeat.endSec > currentBeat.startSec
+          ? Math.max(0, Math.min(1, (t - currentBeat.startSec) / (currentBeat.endSec - currentBeat.startSec)))
+          : 0;
+
+        let panOffset = 0;
+        let zoomOffset = 0;
+
+        if (shot.move === 'pan_left') panOffset = (beatProgress - 0.5) * 1.5;
+        if (shot.move === 'pan_right') panOffset = -(beatProgress - 0.5) * 1.5;
+        if (shot.move === 'zoom_in' || shot.move === 'dolly_in') zoomOffset = -beatProgress * 0.8;
+        if (shot.move === 'zoom_out') zoomOffset = beatProgress * 0.8;
+
+        camera.position.set(targetPos.x + panOffset, camHeight, targetPos.z + camDist + zoomOffset);
+        camera.lookAt(targetPos.x, 2.8, targetPos.z);
+
+        // Camera Auto-Framing: Ensure character head stays below 12%-20% top caption band
+        const headVec = targetPos.clone().add(new THREE.Vector3(0, 3.4, 0));
+        const projectedHead = headVec.project(camera);
+        if (projectedHead.y > 0.38) {
+          // Pitch down slightly and increase distance by 15%
+          camDist *= 1.15;
+          camHeight = Math.max(2.0, camHeight - 0.35);
+          camera.position.set(targetPos.x + panOffset, camHeight, targetPos.z + camDist + zoomOffset);
+          camera.lookAt(targetPos.x, 2.4, targetPos.z);
+        }
+
+        const hasShakeSfx = currentBeat.sfx && currentBeat.sfx.some(s => (s.cue === 'boom' || s.cue === 'impact') && Math.abs(t - s.startSec) < 0.4);
+        if (hasShakeSfx || shot.move === 'shake') {
+          camera.position.x += (Math.random() - 0.5) * 0.15;
+          camera.position.y += (Math.random() - 0.5) * 0.15;
+        }
+
+        characters.forEach((charObj, charId) => {
+          const isSpeaker = (charId === currentBeat.speaker);
+          const activeAction = (currentBeat.actions || []).find(a => a.actor === charId && t >= a.startSec) ||
+            (currentBeat.actions || []).find(a => a.actor === charId) ||
+            { anim: isSpeaker ? 'talk_gesture' : 'idle', expression: 'neutral' };
+
+          charObj.currentExpression = activeAction.expression || 'neutral';
+          animateCharacter(charObj, activeAction.anim || 'idle', t, isSpeaker);
+        });
+
+        // Smoke puff animation in 3D
+        const hasSmoke = currentBeat.fx?.some(f => f.type.includes('smoke') || f.type.includes('puff')) ||
+                         currentBeat.text?.toLowerCase().includes('lie');
+        if (smokePuffGroup) {
+          if (hasSmoke) {
+            if (!window.__RENDERED_FX__.includes('puff_smoke')) {
+              window.__RENDERED_FX__.push('puff_smoke');
+            }
+            smokePuffGroup.children.forEach((p, idx) => {
+              const scale = 1.0 + (t % 1.5) * 2.5 + idx * 0.3;
+              p.scale.set(scale, scale, scale);
+              p.position.y = 0.5 + (t % 1.5) * 1.2 + idx * 0.2;
+              p.material.opacity = Math.max(0, 0.8 - (t % 1.5) * 0.5);
+            });
+          } else {
+            smokePuffGroup.children.forEach(p => p.material.opacity = 0);
+          }
+        }
+      }
+
+      renderer.render(scene, camera);
+      if (overlayCtx) {
+        overlayCtx.clearRect(0, 0, 1080, 1920);
+        renderInCanvasCaptions(overlayCtx, currentBeat, t);
+      }
+      return Promise.resolve(true);
+    };
+  </script>
+</body>
+</html>

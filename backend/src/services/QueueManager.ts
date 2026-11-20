@@ -39,17 +39,24 @@ export class QueueManager {
     // Event bus listener for logging
     EventBus.subscribe('*', (payload) => {
       if (payload.jobId) {
-        const stmt = db.prepare(`
-          INSERT INTO job_logs (job_id, stage, message, level, timestamp)
-          VALUES (?, ?, ?, ?, ?)
-        `);
-        stmt.run(
-          payload.jobId,
-          payload.stageName || payload.event,
-          JSON.stringify(payload),
-          payload.event?.includes('Failed') ? 'error' : 'info',
-          Date.now()
-        );
+        try {
+          const jobExists = db.prepare('SELECT id FROM jobs WHERE id = ?').get(payload.jobId);
+          if (jobExists) {
+            const stmt = db.prepare(`
+              INSERT INTO job_logs (job_id, stage, message, level, timestamp)
+              VALUES (?, ?, ?, ?, ?)
+            `);
+            stmt.run(
+              payload.jobId,
+              payload.stageName || payload.event,
+              JSON.stringify(payload),
+              payload.event?.includes('Failed') ? 'error' : 'info',
+              Date.now()
+            );
+          }
+        } catch (err) {
+          // Safeguard: logging errors or non-DB jobs must never crash workflow execution
+        }
       }
     });
 

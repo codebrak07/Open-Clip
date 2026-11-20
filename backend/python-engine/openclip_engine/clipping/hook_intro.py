@@ -118,10 +118,11 @@ def generate_hook_narration(
     hook_sentence: str = "",
     is_live: bool = False,
     use_llm: bool = True,
+    custom_context: str = "",
 ) -> str:
     """
-    Writes a punchy 1-sentence English Male Narrator cold-open hook (8-16 words, ~2.8-4.2s)
-    telling viewers what is about to happen with the streamer/creator before the clip plays.
+    Writes a punchy 1-sentence English Male Narrator cold-open hook (8-15 words, ~2.8-3.8s)
+    telling viewers specifically what happened with the streamer/creator in THIS clip.
     """
     fallback = _fallback_hook_narration(
         transcript=transcript,
@@ -139,19 +140,23 @@ def generate_hook_narration(
         "and TikTok streamer clip channels (like IShowSpeed, Kai Cenat, Mythpat highlight channels). "
         "Return ONLY valid JSON: {\"narration\": \"...\"}. "
         "Rules:\n"
-        "- STRICTLY ONE short English sentence, 8 to 15 words total (3 to 4 seconds spoken).\n"
-        "- Start with a natural narrator setup like 'This is what happened when...', "
-        "'Watch what happened when...', or 'This is what happened on <streamer>'s stream when...'.\n"
+        "- STRICTLY ONE short English sentence, 8 to 14 words total (2.8 to 3.8 seconds spoken).\n"
+        "- Start with a natural narrator setup like 'This is what happened when <streamer>...', "
+        "'This is what happened with <streamer> when...', or 'Watch what happened when <streamer>...'.\n"
+        "- Focus on the SPECIFIC crazy event/quote/reaction in THIS clip's transcript or custom note — "
+        "NEVER just repeat the generic stream title.\n"
         "- Mention the streamer/creator name naturally if provided.\n"
         "- Build instant curiosity WITHOUT spoiling the punchline.\n"
         "- Pure English only, no emojis, no hashtags, no quotes, no Devanagari."
     )
+    custom_block = f"Custom What Happened Note (PRIORITIZE THIS): {_clean_english(custom_context)[:220]}\n" if custom_context else ""
     user_prompt = (
         f"Creator/Streamer: {streamer or 'Unknown'}\n"
         f"Format: {'Live Stream' if is_live else 'Video'}\n"
-        f"Source Title: {_clean_english(video_title)[:120]}\n"
+        f"{custom_block}"
+        f"Source Title (background only, do NOT copy verbatim): {_clean_english(video_title)[:120]}\n"
         f"Opening Hook: {_clean_english(hook_sentence)[:160]}\n"
-        f"Clip Transcript: {_clean_english(transcript)[:500]}\n\n"
+        f"Clip Transcript (focus on what ACTUALLY happens here): {_clean_english(transcript)[:550]}\n\n"
         "Return strict JSON with key: narration."
     )
 
@@ -737,8 +742,13 @@ def prepend_ai_hook_intro(
             allow_network=allow_tts_network,
         )
 
-        # Hold ~0.28s after final narrator word for crisp transition whoosh into main clip
-        intro_dur = round(max(1.8, min(6.5, voice_dur + 0.28)), 3)
+        # Trim trailing TTS silence after final spoken word + add 0.24s for crisp whoosh transition
+        if narrator_words:
+            last_end = max(float(w.get("end") or 0.0) for w in narrator_words)
+            eff_voice_dur = min(voice_dur, max(1.4, last_end + 0.14))
+        else:
+            eff_voice_dur = voice_dur
+        intro_dur = round(max(1.8, min(6.0, eff_voice_dur + 0.24)), 3)
         _write_transition_whoosh_wav(whoosh_wav, duration_s=0.24, sr=48000)
 
         # 3. Pick peak-energy climax preview slice from clean raw source

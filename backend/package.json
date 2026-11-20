@@ -7,9 +7,16 @@
     "dev": "ts-node-dev --respawn --transpile-only src/index.ts",
     "build": "tsc",
     "start": "node dist/index.js",
-    "test": "jest"
+    "test": "jest",
+    "tts:doctor": "ts-node src/cli/ttsDoctor.ts",
+    "story:verify": "ts-node src/cli/storyVerify.ts",
+    "story:test-e2e": "ts-node src/cli/runStoryE2E.ts",
+    "story:benchmark": "ts-node src/cli/storyBenchmark.ts",
+    "story:profile": "ts-node src/cli/storyProfile.ts",
+    "story:parity": "ts-node src/cli/storyParity.ts"
   },
   "dependencies": {
+    "@types/three": "^0.187.0",
     "axios": "^1.7.2",
     "better-sqlite3": "^13.2.0",
     "cors": "^2.8.5",
@@ -17,6 +24,8 @@
     "express": "^4.19.2",
     "fluent-ffmpeg": "^2.1.3",
     "multer": "^1.4.5-lts.1",
+    "playwright": "^1.65.1",
+    "three": "^0.187.0",
     "zod": "^3.23.8"
   },
   "devDependencies": {

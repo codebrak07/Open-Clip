@@ -21,16 +21,149 @@ export const OpenClipDirectorWorkspace: React.FC<EditorialWorkspaceProps> = ({
   const videoRef = React.useRef<HTMLVideoElement | null>(null);
   const [hoveredClipId, setHoveredClipId] = useState<string | null>(null);
   const [isDownloadModalOpen, setIsDownloadModalOpen] = useState(false);
-  const [selectedAudience, setSelectedAudience] = useState('LUXURY HUMANS');
 
   const [selectedFormat, setSelectedFormat] = useState('TIKTOK');
   const [waveformZoom, setWaveformZoom] = useState(50);
+
+  // Local editable SEO overrides keyed by clip.id so edits & custom AI regenerations reflect instantly
+  const [seoOverrides, setSeoOverrides] = useState<Record<string, {
+    yt_title: string;
+    description: string;
+    tags: string[];
+    hashtags: string[];
+    hook_narration: string;
+  }>>({});
+  const [editTitle, setEditTitle] = useState('');
+  const [editDescription, setEditDescription] = useState('');
+  const [editHashtags, setEditHashtags] = useState('');
+  const [editTags, setEditTags] = useState('');
+  const [editHookNarration, setEditHookNarration] = useState('');
+  const [customMomentPrompt, setCustomMomentPrompt] = useState('');
+  const [seoBusy, setSeoBusy] = useState<'idle' | 'saving' | 'regenerating'>('idle');
+  const [seoFeedback, setSeoFeedback] = useState<string | null>(null);
+  const [copiedKey, setCopiedKey] = useState<string | null>(null);
+
+  const resolveClipSeo = React.useCallback((clip: ClipData | null | undefined) => {
+    if (!clip) {
+      return { yt_title: '', description: '', tags: [] as string[], hashtags: [] as string[], hook_narration: '' };
+    }
+    const ov = seoOverrides[clip.id];
+    if (ov) return ov;
+    return {
+      yt_title: clip.seo?.yt_title || clip.yt_title || clip.title || '',
+      description: clip.seo?.description || clip.description || '',
+      tags: clip.seo?.tags || clip.tags || [],
+      hashtags: clip.seo?.hashtags || clip.hashtags || [],
+      hook_narration: clip.seo?.hook_narration || clip.hook_narration || '',
+    };
+  }, [seoOverrides]);
 
   React.useEffect(() => {
     if (!activeClip && clips.length > 0) {
       previewClip(clips[0]);
     }
   }, [activeClip, clips, previewClip]);
+
+  const currentClip = activeClip || (clips.length > 0 ? clips[0] : null);
+
+  React.useEffect(() => {
+    if (!currentClip) return;
+    const seo = resolveClipSeo(currentClip);
+    setEditTitle(seo.yt_title);
+    setEditDescription(seo.description);
+    setEditHashtags(seo.hashtags.join(' '));
+    setEditTags(seo.tags.join(', '));
+    setEditHookNarration(seo.hook_narration);
+    setSeoFeedback(null);
+  }, [currentClip?.id, resolveClipSeo]);
+
+  const copySeoField = (key: string, value: string) => {
+    navigator.clipboard?.writeText(value).catch(() => {});
+    setCopiedKey(key);
+    setTimeout(() => setCopiedKey(null), 1500);
+  };
+
+  const handleSaveCustomSeo = async () => {
+    if (!currentClip) return;
+    setSeoBusy('saving');
+    setSeoFeedback(null);
+    const parsedTags = editTags.split(',').map((t) => t.trim().replace(/^#+/, '').toLowerCase()).filter(Boolean);
+    const parsedHashtags = editHashtags
+      .split(/[\s,]+/)
+      .map((h) => h.trim().replace(/^#+/, ''))
+      .filter(Boolean)
+      .map((h) => `#${h.toLowerCase()}`);
+
+    try {
+      const resp = await fetch(`${API_BASE_URL}/api/clips/${encodeURIComponent(currentClip.id)}/seo`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          yt_title: editTitle.trim(),
+          description: editDescription.trim(),
+          tags: parsedTags,
+          hashtags: parsedHashtags,
+          hook_narration: editHookNarration.trim(),
+        }),
+      });
+      if (resp.ok) {
+        const data = await resp.json();
+        const saved = {
+          yt_title: data.yt_title || editTitle.trim(),
+          description: data.description ?? editDescription.trim(),
+          tags: Array.isArray(data.tags) ? data.tags : parsedTags,
+          hashtags: Array.isArray(data.hashtags) ? data.hashtags : parsedHashtags,
+          hook_narration: data.hook_narration ?? editHookNarration.trim(),
+        };
+        setSeoOverrides((prev) => ({ ...prev, [currentClip.id]: saved }));
+        setSeoFeedback('✓ Saved custom SEO to clip & .seo.json');
+      } else {
+        setSeoFeedback('✗ Could not save SEO');
+      }
+    } catch {
+      setSeoFeedback('✗ Network error saving SEO');
+    } finally {
+      setSeoBusy('idle');
+    }
+  };
+
+  const handleRegenerateCustomSeo = async () => {
+    if (!currentClip) return;
+    setSeoBusy('regenerating');
+    setSeoFeedback(null);
+    try {
+      const resp = await fetch(`${API_BASE_URL}/api/clips/${encodeURIComponent(currentClip.id)}/seo/regenerate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          customContext: customMomentPrompt.trim(),
+        }),
+      });
+      if (resp.ok) {
+        const data = await resp.json();
+        const nextSeo = {
+          yt_title: data.yt_title || editTitle,
+          description: data.description || editDescription,
+          tags: Array.isArray(data.tags) ? data.tags : [],
+          hashtags: Array.isArray(data.hashtags) ? data.hashtags : [],
+          hook_narration: data.hook_narration || editHookNarration,
+        };
+        setSeoOverrides((prev) => ({ ...prev, [currentClip.id]: nextSeo }));
+        setEditTitle(nextSeo.yt_title);
+        setEditDescription(nextSeo.description);
+        setEditTags(nextSeo.tags.join(', '));
+        setEditHashtags(nextSeo.hashtags.join(' '));
+        setEditHookNarration(nextSeo.hook_narration);
+        setSeoFeedback('✨ Custom YouTube SEO regenerated!');
+      } else {
+        setSeoFeedback('✗ Regeneration failed');
+      }
+    } catch {
+      setSeoFeedback('✗ Network error regenerating SEO');
+    } finally {
+      setSeoBusy('idle');
+    }
+  };
 
   const confidenceScore = activeClip ? activeClip.score : 88;
   const firstClip = clips.length > 0 ? clips[0] : null;
@@ -315,8 +448,29 @@ export const OpenClipDirectorWorkspace: React.FC<EditorialWorkspaceProps> = ({
                           {formatTime(clip.start_time)} - {formatTime(clip.end_time)}
                         </span>
                       </div>
-                      <h4 style={{ fontSize: '15px', fontWeight: 700, color: '#121212', margin: 0, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{clip.title}</h4>
-                      <p style={{ fontSize: '12px', fontFamily: "'Inter', sans-serif", color: '#666', margin: 0 }}>{formatTime(clip.end_time - clip.start_time)} Cut • Retention Peak</p>
+                      <h4
+                        style={{
+                          fontSize: '14px',
+                          fontWeight: 700,
+                          color: '#121212',
+                          margin: 0,
+                          lineHeight: 1.35,
+                          display: '-webkit-box',
+                          WebkitLineClamp: 2,
+                          WebkitBoxOrient: 'vertical',
+                          overflow: 'hidden',
+                        }}
+                      >
+                        {resolveClipSeo(clip).yt_title || clip.title}
+                      </h4>
+                      <p style={{ fontSize: '12px', fontFamily: "'Inter', sans-serif", color: '#666', margin: 0 }}>
+                        {formatTime(clip.end_time - clip.start_time)} Cut • Retention Peak
+                      </p>
+                      {resolveClipSeo(clip).hashtags.length > 0 && (
+                        <div style={{ fontSize: '10px', fontFamily: "'JetBrains Mono', monospace", color: '#047857', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                          {resolveClipSeo(clip).hashtags.slice(0, 4).join(' ')}
+                        </div>
+                      )}
                     </div>
                   );
                 })
@@ -379,52 +533,297 @@ export const OpenClipDirectorWorkspace: React.FC<EditorialWorkspaceProps> = ({
               <p style={{ fontSize: '13px', fontFamily: "'Inter', sans-serif", color: '#666', margin: '8px 0 0 0', fontWeight: 500 }}>
                 {clips.length > 0 ? 'Overall Audience Fit Confidence' : 'Multimodal Engine Evaluating Scene Motion & Audio Energy'}
               </p>
-            {/* Dynamic Content & Audience Tags derived from Video Analysis */}
-            <div>
-              <label style={{ fontSize: '10px', fontFamily: "'Inter', sans-serif", fontWeight: 700, letterSpacing: '0.1em', color: '#666', textTransform: 'uppercase', display: 'block', marginBottom: '8px' }}>
-                DETECTED VIDEO CATEGORY & AUDIENCE
-              </label>
-              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px', fontSize: '12px', fontFamily: "'Inter', sans-serif" }}>
-                {(() => {
-                  if (!clips || clips.length === 0) {
-                    return ['ANALYZING CONTENT...'].map(t => (
-                      <span key={t} style={{ padding: '6px 14px', borderRadius: '20px', backgroundColor: '#EBE6DA', color: '#666', fontSize: '11px', fontWeight: 600 }}>{t}</span>
-                    ));
-                  }
+            {/* YouTube SEO Package & Custom Moment Generator for Active Clip */}
+            {currentClip && (
+              <div
+                style={{
+                  borderTop: '1px solid #E2DEC5',
+                  paddingTop: '16px',
+                  marginTop: '14px',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: '10px',
+                  fontFamily: "'Inter', sans-serif",
+                }}
+              >
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px' }}>
+                  <label style={{ fontSize: '10px', fontWeight: 700, letterSpacing: '0.1em', color: '#121212', textTransform: 'uppercase' }}>
+                    🎯 YOUTUBE SEO · TITLE, TAGS & DESCRIPTION
+                  </label>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const allText = [
+                        `TITLE:\n${editTitle}`,
+                        `\nDESCRIPTION:\n${editDescription}`,
+                        editHashtags ? `\nHASHTAGS:\n${editHashtags}` : '',
+                        editTags ? `\nTAGS:\n${editTags}` : '',
+                      ].filter(Boolean).join('\n');
+                      copySeoField('all', allText);
+                    }}
+                    style={{
+                      padding: '4px 9px',
+                      borderRadius: '6px',
+                      backgroundColor: '#121212',
+                      color: '#FAF8F3',
+                      border: 'none',
+                      fontSize: '10px',
+                      fontWeight: 700,
+                      cursor: 'pointer',
+                    }}
+                  >
+                    {copiedKey === 'all' ? '✓ Copied All' : 'Copy All SEO'}
+                  </button>
+                </div>
 
-                  // Dynamically extract key words from actual video clips (title & rationale)
-                  const words = clips
-                    .flatMap(c => `${c.title} ${c.hook_rationale || ''}`.split(/\s+/))
-                    .map(w => w.replace(/[^a-zA-Z]/g, '').toUpperCase())
-                    .filter(w => w.length > 3 && !['FAST', 'WITH', 'THIS', 'THAT', 'FROM', 'THEIR', 'PEAK', 'HIGH', 'CUTS', 'BEST', 'BEAT'].includes(w));
-
-                  const uniqueWords = Array.from(new Set(words)).slice(0, 4);
-                  const dynamicTags = uniqueWords.length > 0 
-                    ? uniqueWords.map(w => `${w} CONTENT`) 
-                    : ['VIRAL VIDEO', 'HIGH RETENTION', 'GEN-Z EDIT'];
-
-                  return dynamicTags.map((tag) => (
-                    <button
-                      key={tag}
-                      onClick={() => setSelectedAudience(tag)}
+                {/* Custom "What Happened with Streamer?" Generator */}
+                <div
+                  style={{
+                    backgroundColor: '#FFF',
+                    border: '1px solid #D8D2C2',
+                    borderRadius: '10px',
+                    padding: '9px',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: '6px',
+                  }}
+                >
+                  <span style={{ fontSize: '10px', fontWeight: 700, color: '#666', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+                    ✨ CUSTOMIZE: WHAT HAPPENED IN THIS CLIP?
+                  </span>
+                  <div style={{ display: 'flex', gap: '6px' }}>
+                    <input
+                      type="text"
+                      value={customMomentPrompt}
+                      onChange={(e) => setCustomMomentPrompt(e.target.value)}
+                      placeholder="e.g. IShowSpeed freaked out when GTA 6 charged him rent..."
                       style={{
-                        padding: '6px 14px',
-                        borderRadius: '20px',
-                        border: selectedAudience === tag ? '1px solid #121212' : '1px solid #D8D2C2',
-                        backgroundColor: selectedAudience === tag ? '#121212' : '#FFF',
-                        color: selectedAudience === tag ? '#FFF' : '#444',
-                        cursor: 'pointer',
-                        fontWeight: 600,
+                        flex: 1,
                         fontSize: '11px',
-                        transition: 'all 0.2s ease',
+                        padding: '6px 8px',
+                        borderRadius: '6px',
+                        border: '1px solid #D8D2C2',
+                        backgroundColor: '#FAF8F3',
+                        color: '#121212',
+                        outline: 'none',
+                      }}
+                    />
+                    <button
+                      type="button"
+                      disabled={seoBusy !== 'idle'}
+                      onClick={handleRegenerateCustomSeo}
+                      style={{
+                        padding: '6px 10px',
+                        borderRadius: '6px',
+                        backgroundColor: '#044e39',
+                        color: '#FFF',
+                        border: 'none',
+                        fontSize: '10px',
+                        fontWeight: 700,
+                        cursor: seoBusy !== 'idle' ? 'wait' : 'pointer',
+                        whiteSpace: 'nowrap',
+                        opacity: seoBusy !== 'idle' ? 0.7 : 1,
                       }}
                     >
-                      {tag}
+                      {seoBusy === 'regenerating' ? 'Generating...' : '✨ Custom SEO'}
                     </button>
-                  ));
-                })()}
+                  </div>
+                </div>
+
+                {/* AI Male Hook Intro Line */}
+                {editHookNarration && (
+                  <div
+                    style={{
+                      backgroundColor: '#FFFBEB',
+                      border: '1px solid #FDE68A',
+                      borderRadius: '8px',
+                      padding: '8px 10px',
+                      display: 'flex',
+                      flexDirection: 'column',
+                      gap: '4px',
+                    }}
+                  >
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                      <span style={{ fontSize: '10px', fontWeight: 700, color: '#92400E' }}>🎙️ AI MALE HOOK VOICEOVER</span>
+                      <button
+                        type="button"
+                        onClick={() => copySeoField('hook', editHookNarration)}
+                        style={{ fontSize: '10px', background: 'transparent', border: 'none', color: '#92400E', fontWeight: 700, cursor: 'pointer' }}
+                      >
+                        {copiedKey === 'hook' ? '✓' : 'Copy'}
+                      </button>
+                    </div>
+                    <input
+                      type="text"
+                      value={editHookNarration}
+                      onChange={(e) => setEditHookNarration(e.target.value)}
+                      style={{
+                        fontSize: '11px',
+                        color: '#78350F',
+                        backgroundColor: 'transparent',
+                        border: 'none',
+                        outline: 'none',
+                        width: '100%',
+                        fontWeight: 600,
+                      }}
+                    />
+                  </div>
+                )}
+
+                {/* Editable YouTube Title */}
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <span style={{ fontSize: '10px', fontWeight: 700, color: '#555' }}>
+                      YOUTUBE TITLE ({editTitle.length}/95)
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => copySeoField('title', editTitle)}
+                      style={{ fontSize: '10px', padding: '2px 7px', borderRadius: '4px', border: '1px solid #D8D2C2', backgroundColor: '#FFF', cursor: 'pointer', fontWeight: 600 }}
+                    >
+                      {copiedKey === 'title' ? '✓ Copied' : 'Copy'}
+                    </button>
+                  </div>
+                  <input
+                    type="text"
+                    value={editTitle}
+                    maxLength={95}
+                    onChange={(e) => setEditTitle(e.target.value)}
+                    style={{
+                      fontSize: '12px',
+                      fontWeight: 600,
+                      padding: '7px 9px',
+                      borderRadius: '7px',
+                      border: '1px solid #D8D2C2',
+                      backgroundColor: '#FFF',
+                      color: '#121212',
+                      outline: 'none',
+                    }}
+                  />
+                </div>
+
+                {/* Editable YouTube Description */}
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <span style={{ fontSize: '10px', fontWeight: 700, color: '#555' }}>DESCRIPTION</span>
+                    <button
+                      type="button"
+                      onClick={() => copySeoField('desc', editDescription)}
+                      style={{ fontSize: '10px', padding: '2px 7px', borderRadius: '4px', border: '1px solid #D8D2C2', backgroundColor: '#FFF', cursor: 'pointer', fontWeight: 600 }}
+                    >
+                      {copiedKey === 'desc' ? '✓ Copied' : 'Copy'}
+                    </button>
+                  </div>
+                  <textarea
+                    rows={3}
+                    value={editDescription}
+                    onChange={(e) => setEditDescription(e.target.value)}
+                    style={{
+                      fontSize: '11px',
+                      lineHeight: 1.45,
+                      padding: '7px 9px',
+                      borderRadius: '7px',
+                      border: '1px solid #D8D2C2',
+                      backgroundColor: '#FFF',
+                      color: '#121212',
+                      resize: 'vertical',
+                      outline: 'none',
+                      fontFamily: "'Inter', sans-serif",
+                    }}
+                  />
+                </div>
+
+                {/* Editable Hashtags */}
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <span style={{ fontSize: '10px', fontWeight: 700, color: '#555' }}>HASHTAGS</span>
+                    <button
+                      type="button"
+                      onClick={() => copySeoField('hashtags', editHashtags)}
+                      style={{ fontSize: '10px', padding: '2px 7px', borderRadius: '4px', border: '1px solid #D8D2C2', backgroundColor: '#FFF', cursor: 'pointer', fontWeight: 600 }}
+                    >
+                      {copiedKey === 'hashtags' ? '✓ Copied' : 'Copy'}
+                    </button>
+                  </div>
+                  <input
+                    type="text"
+                    value={editHashtags}
+                    onChange={(e) => setEditHashtags(e.target.value)}
+                    placeholder="#shorts #ishowspeed #gta6 #live"
+                    style={{
+                      fontSize: '11px',
+                      fontFamily: "'JetBrains Mono', monospace",
+                      padding: '6px 9px',
+                      borderRadius: '7px',
+                      border: '1px solid #D8D2C2',
+                      backgroundColor: '#FFF',
+                      color: '#047857',
+                      outline: 'none',
+                    }}
+                  />
+                </div>
+
+                {/* Editable SEO Tags */}
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <span style={{ fontSize: '10px', fontWeight: 700, color: '#555' }}>
+                      SEO TAGS ({editTags.length}/500 chars)
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => copySeoField('tags', editTags)}
+                      style={{ fontSize: '10px', padding: '2px 7px', borderRadius: '4px', border: '1px solid #D8D2C2', backgroundColor: '#FFF', cursor: 'pointer', fontWeight: 600 }}
+                    >
+                      {copiedKey === 'tags' ? '✓ Copied' : 'Copy'}
+                    </button>
+                  </div>
+                  <textarea
+                    rows={2}
+                    value={editTags}
+                    onChange={(e) => setEditTags(e.target.value)}
+                    placeholder="ishowspeed, gta 6, viral clip, shorts..."
+                    style={{
+                      fontSize: '11px',
+                      lineHeight: 1.4,
+                      padding: '6px 9px',
+                      borderRadius: '7px',
+                      border: '1px solid #D8D2C2',
+                      backgroundColor: '#FFF',
+                      color: '#333',
+                      resize: 'vertical',
+                      outline: 'none',
+                      fontFamily: "'JetBrains Mono', monospace",
+                    }}
+                  />
+                </div>
+
+                {/* Save Custom Edits Button + Status */}
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px' }}>
+                  <button
+                    type="button"
+                    disabled={seoBusy !== 'idle'}
+                    onClick={handleSaveCustomSeo}
+                    style={{
+                      padding: '7px 12px',
+                      borderRadius: '7px',
+                      backgroundColor: '#121212',
+                      color: '#FFF',
+                      border: 'none',
+                      fontSize: '11px',
+                      fontWeight: 700,
+                      cursor: seoBusy !== 'idle' ? 'wait' : 'pointer',
+                    }}
+                  >
+                    {seoBusy === 'saving' ? 'Saving...' : '💾 Save Custom SEO'}
+                  </button>
+                  {seoFeedback && (
+                    <span style={{ fontSize: '11px', fontWeight: 600, color: seoFeedback.startsWith('✗') ? '#B42318' : '#059669' }}>
+                      {seoFeedback}
+                    </span>
+                  )}
+                </div>
               </div>
-            </div>
+            )}
 
             </div>
 

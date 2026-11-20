@@ -1,0 +1,60 @@
+{
+  "id": "roblox-storytime",
+  "fps": 30,
+  "aspect": "9:16",
+  "duration": {
+    "min": 45,
+    "default": 90,
+    "max": 100
+  },
+  "pacing": {
+    "hardCutsPerMin": {
+      "min": 15,
+      "target": 22
+    },
+    "maxHoldSec": 3,
+    "silentGapMaxSec": 0.25,
+    "revealPauseMaxSec": 0.6,
+    "wordsPerSec": 3.5,
+    "deadAirRatioMax": 0.05
+  },
+  "captions": {
+    "preset": "reference_caps",
+    "wordsPerCard": [2, 4],
+    "holdSecTarget": 0.75,
+    "topPct": [12, 20],
+    "emphasis": "caps_1_per_card",
+    "coverageMin": 0.95,
+    "staleCardsMax": 0
+  },
+  "world": {
+    "environmentsMin": {
+      "per45s": 3,
+      "per90s": 5
+    },
+    "avatarsMin": {
+      "per45s": 4,
+      "per90s": 8
+    },
+    "visualEventCoverageMin": 0.9
+  },
+  "audio": {
+    "lufs": -14,
+    "lufsTol": 1,
+    "truePeakMax": -1,
+    "sfxPerMinMin": 6,
+    "narrator": "single_continuous"
+  },
+  "structure": [
+    { "role": "hook", "tSec": [0, 3] },
+    { "role": "rule_mechanics", "t": [0.03, 0.12] },
+    { "role": "society", "t": [0.12, 0.23] },
+    { "role": "protagonist_friend", "t": [0.23, 0.35] },
+    { "role": "inciting", "t": [0.35, 0.5] },
+    { "role": "attempts", "t": [0.5, 0.62] },
+    { "role": "reveal", "t": [0.62, 0.72] },
+    { "role": "payoff", "t": [0.72, 0.9] },
+    { "role": "mirror", "t": [0.9, 0.96] },
+    { "role": "button", "t": [0.96, 1.0] }
+  ]
+}

@@ -16,7 +16,12 @@ import { PythonEngineBridge } from '../../services/PythonEngineBridge';
 import { UPLOADS_DIR, OUTPUTS_DIR } from '../../config';
 import crypto from 'crypto';
 
+import storyRouter from './story';
+
 const v1Router = Router();
+
+// Story Studio Autonomous Generative Module
+v1Router.use('/story', storyRouter);
 
 // GET /v1/diagnostics
 v1Router.get('/diagnostics', async (req, res) => {

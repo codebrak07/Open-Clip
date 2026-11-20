@@ -1,6 +1,6 @@
 import React from 'react';
 
-export type AppView = 'journey' | 'viral-factory' | 'football-studio' | 'workspace' | 'providers' | 'diagnostics';
+export type AppView = 'journey' | 'viral-factory' | 'football-studio' | 'story-studio' | 'workspace' | 'providers' | 'diagnostics';
 
 interface AppLayoutProps {
   children: React.ReactNode;
@@ -18,6 +18,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({
   const navItems: Array<{ id: AppView; label: string; icon: string }> = [
     { id: 'journey', label: 'Journey', icon: '〰️' },
     { id: 'viral-factory', label: 'Viral Clip Factory', icon: '⚡' },
+    { id: 'story-studio', label: 'Story Studio', icon: '🎮' },
     { id: 'football-studio', label: 'Football Studio', icon: '⚽' },
     { id: 'workspace', label: 'Director Workspace', icon: '🎬' },
     { id: 'providers', label: 'AI Providers', icon: '🧠' },

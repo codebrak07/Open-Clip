@@ -208,33 +208,41 @@ def generate_clip_seo(
     is_live: bool = False,
     aspect_ratio: str = "9:16",
     use_llm: bool = True,
+    custom_context: str = "",
 ) -> Dict[str, Any]:
     """
     Generates a full YouTube SEO metadata bundle (`yt_title`, `description`, `tags`, `hashtags`)
-    for a clip using the repo's LLM provider layer with deterministic non-LLM fallback.
+    tailored specifically to what happened in THIS clip (never generic stream-title copy-paste).
     """
     is_vertical = aspect_ratio in ("9:16", "4:5", "3:4")
     fallback = _fallback_seo(transcript, video_title, uploader, hook_sentence, is_live, is_vertical)
     if not use_llm:
         return _sanitize_seo_package(fallback, fallback, is_vertical, is_live)
 
+    custom_block = (
+        f"Custom creator/moment note (PRIORITIZE THIS): {custom_context.strip()[:260]}\n"
+        if (custom_context or "").strip()
+        else ""
+    )
     prompt = (
-        "Generate a high-CTR, SEO-optimized YouTube "
-        f"{'Shorts ' if is_vertical else ''}metadata package in ENGLISH for this video clip.\n"
-        f"Source video title: {video_title[:160]}\n"
-        f"Creator/Channel: {uploader or 'Creator'}\n"
+        "Generate a HIGH-CTR, CUSTOM YouTube "
+        f"{'Shorts ' if is_vertical else ''}SEO metadata package in ENGLISH specifically about WHAT HAPPENED in THIS exact clip.\n"
+        f"Creator/Streamer: {uploader or 'Creator'}\n"
         f"Is Live Stream: {is_live}\n"
-        f"Hook moment: {hook_sentence[:180]}\n"
-        f"Clip spoken transcript: {transcript[:600]}\n\n"
-        "Rules:\n"
-        "- yt_title: Catchy, curiosity-driven English title <= 75 chars (no clickbait lies, include game/topic or creator when natural).\n"
-        "- description: 2-3 punchy English sentences summarizing the clip with natural SEO keywords + a short subscribe CTA + 5 hashtags at the bottom.\n"
-        "- tags: 12-16 high-intent lowercase YouTube search tags (mix of creator, game/topic, clip intent, shorts/highlights; no '#' symbol).\n"
-        "- hashtags: 6-7 relevant hashtags starting with '#' (include #shorts if vertical).\n"
+        f"{custom_block}"
+        f"Source stream/video title (context ONLY — DO NOT copy this phrase verbatim as the title!): {video_title[:160]}\n"
+        f"Clip opening hook: {hook_sentence[:180]}\n"
+        f"Clip spoken transcript (build the title & description directly from what actually happens here!): {transcript[:650]}\n\n"
+        "Strict Rules:\n"
+        "- yt_title: <= 75 chars, custom & specific to THIS clip's unique moment/reaction/dialogue with the creator! "
+        "NEVER start with generic boilerplate like '<Creator> Plays <Stream Title>' — lead with the specific funny/wild/shocking thing that happened (e.g. 'When GTA 6 Threatened to Charge IShowSpeed Rent! 💀' or 'IShowSpeed Couldn\\'t Believe This GTA 6 Scene!').\n"
+        "- description: 2-3 punchy English sentences explaining what specifically happened with the creator in THIS clip (using details from the transcript/custom note) + natural SEO keywords + subscribe CTA + 5 hashtags at the bottom.\n"
+        "- tags: 12-16 high-intent lowercase YouTube search tags specific to this creator, the exact moment/topic, game/event, and clips/shorts search queries (no '#' symbol, no generic filler words like 'playing' or 'get in here').\n"
+        "- hashtags: 6-7 relevant hashtags starting with '#' (include #shorts if vertical, creator tag, topic tag).\n"
         "Return ONLY valid JSON: "
         '{"yt_title": str, "description": str, "tags": [str, ...], "hashtags": [str, ...]}'
     )
-    sys_prompt = "You are a YouTube Shorts & SEO growth strategist. Return ONLY raw valid JSON in English."
+    sys_prompt = "You are a top viral YouTube Shorts & streamer-clip SEO strategist. Every clip MUST get a unique, moment-specific title and description — never repeat the generic livestream title. Return ONLY raw valid JSON in English."
 
     try:
         res = call_llm_json(prompt, system_prompt=sys_prompt)

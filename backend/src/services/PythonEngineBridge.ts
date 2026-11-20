@@ -16,12 +16,22 @@ export class PythonEngineBridge {
 
   public static async runCommand(args: string[]): Promise<any> {
     const pythonBin = this.resolvePythonBin();
+    const venvCert = path.join(this.pythonEngineDir, '.venv/lib/python3.13/site-packages/certifi/cacert.pem');
+    const userLocalBin = path.join(process.env.HOME || '', '.local/bin');
+    const extendedPath = process.env.PATH
+      ? `${userLocalBin}:/opt/homebrew/bin:/usr/local/bin:${process.env.PATH}`
+      : `${userLocalBin}:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin`;
+
     return new Promise((resolve, reject) => {
       const pythonProcess = spawn(pythonBin, ['-m', 'openclip_engine.cli.main', ...args], {
         cwd: this.pythonEngineDir,
         env: {
           ...process.env,
+          PATH: extendedPath,
           PYTHONPATH: this.pythonEngineDir,
+          ...(fs.existsSync(venvCert)
+            ? { SSL_CERT_FILE: venvCert, REQUESTS_CA_BUNDLE: venvCert }
+            : {}),
         },
       });
 
@@ -194,5 +204,41 @@ export class PythonEngineBridge {
 
   public static async resolveFootball(matchText: string, language: string = 'English', style: string = 'Passionate Fan'): Promise<any> {
     return this.runCommand(['football', matchText, '--language', language, '--style', style]);
+  }
+
+  public static async generateCustomClipSeo(params: {
+    transcript: string;
+    videoTitle: string;
+    uploader: string;
+    hookSentence?: string;
+    customContext?: string;
+    aspectRatio?: string;
+    isLive?: boolean;
+  }): Promise<{
+    yt_title: string;
+    description: string;
+    tags: string[];
+    hashtags: string[];
+    hook_narration?: string;
+  }> {
+    const args = [
+      'generate-seo',
+      '--transcript',
+      params.transcript || '',
+      '--video-title',
+      params.videoTitle || '',
+      '--uploader',
+      params.uploader || '',
+      '--hook-sentence',
+      params.hookSentence || '',
+      '--custom-context',
+      params.customContext || '',
+      '--aspect-ratio',
+      params.aspectRatio || '9:16',
+    ];
+    if (params.isLive) {
+      args.push('--is-live');
+    }
+    return this.runCommand(args);
   }
 }

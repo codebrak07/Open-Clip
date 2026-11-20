@@ -161,6 +161,43 @@ def add_hook_intro_cmd(
     print(json.dumps(meta, indent=2))
 
 
+@app.command(name="generate-seo")
+def generate_seo_cmd(
+    transcript: str = typer.Option("", "--transcript", help="Clip spoken transcript"),
+    video_title: str = typer.Option("", "--video-title", help="Source stream/video title"),
+    uploader: str = typer.Option("", "--uploader", help="Streamer/creator name"),
+    hook_sentence: str = typer.Option("", "--hook-sentence", help="Opening hook sentence"),
+    custom_context: str = typer.Option("", "--custom-context", help="Custom note describing what happened with the creator"),
+    aspect_ratio: str = typer.Option("9:16", "--aspect-ratio", help="Clip aspect ratio"),
+    is_live: bool = typer.Option(False, "--is-live", help="Whether source is a live stream"),
+    no_llm: bool = typer.Option(False, "--no-llm", help="Use deterministic fallback without LLM"),
+):
+    """Generates custom YouTube SEO metadata (title, description, tags, hashtags) + AI hook narration."""
+    from openclip_engine.clipping.hook_intro import generate_hook_narration
+    from openclip_engine.clipping.seo_generator import generate_clip_seo
+
+    seo = generate_clip_seo(
+        transcript=transcript,
+        video_title=video_title,
+        uploader=uploader,
+        hook_sentence=hook_sentence,
+        is_live=is_live,
+        aspect_ratio=aspect_ratio,
+        use_llm=not no_llm,
+        custom_context=custom_context,
+    )
+    seo["hook_narration"] = generate_hook_narration(
+        transcript=transcript,
+        video_title=video_title,
+        uploader=uploader,
+        hook_sentence=hook_sentence,
+        is_live=is_live,
+        use_llm=not no_llm,
+        custom_context=custom_context,
+    )
+    print(json.dumps(seo))
+
+
 @app.command(name="select-hooks")
 def select_hooks_cmd(
     words_json: str,

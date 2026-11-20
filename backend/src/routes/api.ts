@@ -627,4 +627,171 @@ router.post('/jobs/:id/batch-render', async (req, res) => {
   }
 });
 
+/**
+ * PUT /api/clips/:id/seo
+ * Persists custom edited YouTube Title, Description, Tags, Hashtags & AI Hook Narration for a clip
+ */
+router.put('/clips/:id/seo', (req, res) => {
+  try {
+    const { id } = req.params;
+    const clip = db.prepare('SELECT * FROM clips WHERE id = ?').get(id) as Clip | undefined;
+    if (!clip) {
+      return res.status(404).json({ error: 'Clip not found.' });
+    }
+
+    let existingSeo: any = {};
+    if (clip.seo_json) {
+      try { existingSeo = JSON.parse(clip.seo_json); } catch { existingSeo = {}; }
+    }
+
+    const ytTitle = String(req.body.yt_title ?? existingSeo.yt_title ?? clip.title ?? '').trim().slice(0, 95);
+    const description = String(req.body.description ?? existingSeo.description ?? '').trim();
+    const rawTags = req.body.tags;
+    const tags: string[] = Array.isArray(rawTags)
+      ? rawTags.map((t: any) => String(t).trim().replace(/^#+/, '').toLowerCase()).filter(Boolean)
+      : typeof rawTags === 'string'
+      ? rawTags.split(',').map((t) => t.trim().replace(/^#+/, '').toLowerCase()).filter(Boolean)
+      : (existingSeo.tags || []);
+    const rawHashtags = req.body.hashtags;
+    const hashtags: string[] = Array.isArray(rawHashtags)
+      ? rawHashtags.map((h: any) => {
+          const clean = String(h).trim().replace(/^#+/, '').replace(/\s+/g, '');
+          return clean ? `#${clean.toLowerCase()}` : '';
+        }).filter(Boolean)
+      : typeof rawHashtags === 'string'
+      ? rawHashtags.split(/[\s,]+/).map((h) => {
+          const clean = h.trim().replace(/^#+/, '');
+          return clean ? `#${clean.toLowerCase()}` : '';
+        }).filter(Boolean)
+      : (existingSeo.hashtags || []);
+    const hookNarration = String(req.body.hook_narration ?? existingSeo.hook_narration ?? '').trim();
+
+    const updatedSeo = {
+      ...existingSeo,
+      yt_title: ytTitle || clip.title,
+      description,
+      tags,
+      hashtags,
+      hook_narration: hookNarration,
+    };
+
+    db.prepare('UPDATE clips SET title = ?, seo_json = ? WHERE id = ?').run(
+      updatedSeo.yt_title,
+      JSON.stringify(updatedSeo),
+      id
+    );
+
+    if (clip.output_path) {
+      try {
+        fs.writeFileSync(`${clip.output_path}.seo.json`, JSON.stringify(updatedSeo, null, 2), 'utf-8');
+      } catch {
+        // Non-fatal if output_path isn't writable
+      }
+    }
+
+    res.json({
+      success: true,
+      id,
+      yt_title: updatedSeo.yt_title,
+      description: updatedSeo.description,
+      tags: updatedSeo.tags,
+      hashtags: updatedSeo.hashtags,
+      hook_narration: updatedSeo.hook_narration,
+      seo: updatedSeo,
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * POST /api/clips/:id/seo/regenerate
+ * Generates custom YouTube SEO (Title, Description, Tags, Hashtags & AI Hook Narration)
+ * tailored to a user's custom description of what happened with the streamer in this clip
+ */
+router.post('/clips/:id/seo/regenerate', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const customContext = String(req.body.customContext || '').trim();
+    const streamerOverride = String(req.body.streamer || '').trim();
+
+    const clip = db.prepare('SELECT * FROM clips WHERE id = ?').get(id) as Clip | undefined;
+    if (!clip) {
+      return res.status(404).json({ error: 'Clip not found.' });
+    }
+
+    const job = db.prepare('SELECT metadata FROM jobs WHERE id = ?').get(clip.job_id) as Job | undefined;
+    let jobMeta: any = {};
+    if (job?.metadata) {
+      try { jobMeta = JSON.parse(job.metadata); } catch { jobMeta = {}; }
+    }
+
+    let existingSeo: any = {};
+    if (clip.seo_json) {
+      try { existingSeo = JSON.parse(clip.seo_json); } catch { existingSeo = {}; }
+    }
+
+    // Read full spoken transcript from clip's .vtt file if present
+    let transcript = '';
+    if (clip.subtitles_path && fs.existsSync(clip.subtitles_path)) {
+      try {
+        const vttText = fs.readFileSync(clip.subtitles_path, 'utf-8');
+        transcript = vttText
+          .split(/\r?\n/)
+          .filter((l) => l.trim() && !l.startsWith('WEBVTT') && !/^\d+$/.test(l.trim()) && !l.includes('-->'))
+          .join(' ')
+          .slice(0, 700);
+      } catch {
+        transcript = '';
+      }
+    }
+
+    const generated = await PythonEngineBridge.generateCustomClipSeo({
+      transcript: transcript || clip.hook_rationale || clip.title || '',
+      videoTitle: jobMeta.title || clip.title || '',
+      uploader: streamerOverride || jobMeta.uploader || '',
+      hookSentence: clip.hook_rationale || '',
+      customContext,
+      aspectRatio: jobMeta.aspectRatio || '9:16',
+      isLive: Boolean(jobMeta.is_live || existingSeo.hashtags?.includes('#livestream')),
+    });
+
+    const mergedSeo = {
+      ...existingSeo,
+      yt_title: generated.yt_title || existingSeo.yt_title || clip.title,
+      description: generated.description || existingSeo.description || '',
+      tags: Array.isArray(generated.tags) ? generated.tags : (existingSeo.tags || []),
+      hashtags: Array.isArray(generated.hashtags) ? generated.hashtags : (existingSeo.hashtags || []),
+      hook_narration: generated.hook_narration || existingSeo.hook_narration || '',
+    };
+
+    db.prepare('UPDATE clips SET title = ?, seo_json = ? WHERE id = ?').run(
+      mergedSeo.yt_title,
+      JSON.stringify(mergedSeo),
+      id
+    );
+
+    if (clip.output_path) {
+      try {
+        fs.writeFileSync(`${clip.output_path}.seo.json`, JSON.stringify(mergedSeo, null, 2), 'utf-8');
+      } catch {
+        // Non-fatal
+      }
+    }
+
+    res.json({
+      success: true,
+      id,
+      yt_title: mergedSeo.yt_title,
+      description: mergedSeo.description,
+      tags: mergedSeo.tags,
+      hashtags: mergedSeo.hashtags,
+      hook_narration: mergedSeo.hook_narration,
+      seo: mergedSeo,
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 export default router;

@@ -197,8 +197,19 @@ export const StudioHub: React.FC<StudioHubProps> = ({
       setProgressPercent(0);
       const rawMsg = String(err?.message || 'Unable to extract video stream');
       const lines = rawMsg.split('\n').map((l) => l.trim()).filter(Boolean);
-      const concise = lines.length > 0 ? lines[lines.length - 1].slice(0, 180) : rawMsg.slice(0, 180);
-      setStatusMessage(`✕ Import failed: ${concise}`);
+      const meaningful = lines.find((l) =>
+        !l.includes('Confirm you are on') &&
+        !l.includes('template.') &&
+        !l.includes('please report') &&
+        !l.includes('Traceback') &&
+        !l.includes('File "') &&
+        !l.startsWith('/') &&
+        !l.startsWith('│') &&
+        !l.startsWith('╭') &&
+        !l.startsWith('╰') &&
+        l.length > 5
+      ) || lines[0] || rawMsg;
+      setStatusMessage(`✕ Import failed: ${meaningful.replace(/ERROR:\s*/i, '').slice(0, 140)}`);
     }
   };
 

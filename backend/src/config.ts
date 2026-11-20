@@ -66,9 +66,9 @@ export const GOOGLE_API_KEY = process.env.GOOGLE_API_KEY || process.env.GEMINI_A
 
 export const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY || '';
 export const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
-export const FFMPEG_PATH = process.env.FFMPEG_PATH || '';
+export const FFMPEG_PATH = process.env.FFMPEG_PATH || (fs.existsSync('/opt/homebrew/bin/ffmpeg') ? '/opt/homebrew/bin/ffmpeg' : (fs.existsSync('/usr/local/bin/ffmpeg') ? '/usr/local/bin/ffmpeg' : 'ffmpeg'));
 
-export const FFPROBE_PATH = process.env.FFPROBE_PATH || '';
+export const FFPROBE_PATH = process.env.FFPROBE_PATH || (fs.existsSync('/opt/homebrew/bin/ffprobe') ? '/opt/homebrew/bin/ffprobe' : (fs.existsSync('/usr/local/bin/ffprobe') ? '/usr/local/bin/ffprobe' : 'ffprobe'));
 export const PYTHON_PATH = process.env.PYTHON_PATH || 'python3';
 export const DATABASE_PATH = process.env.DATABASE_PATH || 'database.sqlite';
 

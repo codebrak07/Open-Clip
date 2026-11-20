@@ -1,9 +1,12 @@
 import json
 import os
 import re
+import shutil
+import ssl
 import subprocess
 import sys
 import time
+import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -16,6 +19,108 @@ from openclip_engine.clipping.caption_burner import (
     write_vtt,
     build_reframe_and_caption_clip,
 )
+
+try:
+    import certifi
+    _ca_file = certifi.where()
+    if not os.environ.get("SSL_CERT_FILE") or not os.path.exists(os.environ.get("SSL_CERT_FILE", "")):
+        os.environ["SSL_CERT_FILE"] = _ca_file
+    _SSL_CTX = ssl.create_default_context(cafile=_ca_file)
+except Exception:
+    _SSL_CTX = ssl._create_unverified_context()
+
+
+def _safe_urlopen(req: urllib.request.Request, timeout_s: float = 15.0):
+    try:
+        return urllib.request.urlopen(req, timeout=timeout_s, context=_SSL_CTX)
+    except Exception:
+        return urllib.request.urlopen(req, timeout=timeout_s, context=ssl._create_unverified_context())
+
+
+def _find_node_runtime() -> Optional[str]:
+    for c in [
+        shutil.which("node"),
+        "/Users/brak/.local/bin/node",
+        "/opt/homebrew/bin/node",
+        "/usr/local/bin/node",
+        "/usr/bin/node",
+    ]:
+        if c and os.path.exists(c) and os.access(c, os.X_OK):
+            return c
+    return None
+
+
+def _build_ydl_opts(socket_timeout: int = 25, extra_extractor_args: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    opts: Dict[str, Any] = {
+        "quiet": True,
+        "no_warnings": True,
+        "skip_download": True,
+        "noplaylist": True,
+        "nocheckcertificate": True,
+        "socket_timeout": socket_timeout,
+        "retries": 3,
+        "fragment_retries": 3,
+    }
+    node_bin = _find_node_runtime()
+    if node_bin:
+        opts["js_runtimes"] = {"node": {"path": node_bin}, "deno": {}}
+    else:
+        opts["js_runtimes"] = {"deno": {}}
+
+    if extra_extractor_args:
+        opts["extractor_args"] = extra_extractor_args
+    return opts
+
+
+def _extract_info_safe(url: str, timeout: int = 25) -> Dict[str, Any]:
+    """
+    Extracts YouTube metadata/formats safely using a multi-tiered resilience cascade:
+      Tier 1: Modern yt-dlp Auto-Client Cascade with real Node.js JS runtime (visionos/tv/web/android).
+      Tier 2: Broad VisionOS + iOS + Android + TV + Web client set.
+      Tier 3: Android Creator / Direct Client Bypass.
+      Tier 4: iOS + Web Mobile.
+    Normalizes '/live/' URLs to canonical '/watch?v=' endpoints to bypass player response extraction blocks.
+    """
+    import yt_dlp
+
+    video_id = URLValidator.extract_youtube_video_id(url)
+    target_url = f"https://www.youtube.com/watch?v={video_id}" if video_id else url
+    urls_to_try: List[str] = [target_url]
+    if url != target_url and url not in urls_to_try:
+        urls_to_try.append(url)
+
+    strategies: List[Tuple[str, Optional[Dict[str, Any]]]] = [
+        ("Tier 1: Modern yt-dlp Auto Cascade with Node JS Runtime", None),
+        (
+            "Tier 2: Broad VisionOS + iOS + Android + TV + Web",
+            {"youtube": {"player_client": ["visionos", "ios", "android", "tv", "web"]}},
+        ),
+        (
+            "Tier 3: Android Creator / Direct Client Bypass",
+            {"youtube": {"player_client": ["android_creator", "android"], "player_skip": ["webpage", "configs"]}},
+        ),
+        (
+            "Tier 4: iOS + Web Mobile",
+            {"youtube": {"player_client": ["ios", "mweb", "web"]}},
+        ),
+    ]
+
+    last_error: Optional[Exception] = None
+    for _, extra_args in strategies:
+        opts = _build_ydl_opts(socket_timeout=timeout, extra_extractor_args=extra_args)
+        for u in urls_to_try:
+            try:
+                with yt_dlp.YoutubeDL(opts) as ydl:
+                    info = ydl.extract_info(u, download=False)
+                    if info and (info.get("formats") or info.get("url") or info.get("title")):
+                        return dict(info)
+            except Exception as exc:
+                last_error = exc
+                continue
+
+    if last_error:
+        raise last_error
+    raise RuntimeError(f"yt-dlp returned empty video info for {url}")
 
 
 def _load_groq_api_key() -> str:
@@ -44,9 +149,10 @@ def _parse_hls_dvr_segments(m3u8_url: str, timeout_s: float = 15.0) -> Tuple[Lis
     Fetches a YouTube Live/DVR HLS playlist and returns:
       (segments, total_duration_s)
     where each segment is (start_offset_s, dur_s, absolute_seg_url).
+    Resolves relative URLs against m3u8_url using urllib.parse.urljoin.
     """
     req = urllib.request.Request(m3u8_url, headers={"User-Agent": "Mozilla/5.0"})
-    with urllib.request.urlopen(req, timeout=timeout_s) as resp:
+    with _safe_urlopen(req, timeout_s=timeout_s) as resp:
         text = resp.read().decode("utf-8", errors="ignore")
 
     segments: List[Tuple[float, float, str]] = []
@@ -61,7 +167,8 @@ def _parse_hls_dvr_segments(m3u8_url: str, timeout_s: float = 15.0) -> Tuple[Lis
             pending_dur = float(m.group(1)) if m else 5.0
         elif not line.startswith("#"):
             dur = pending_dur if pending_dur is not None else 5.0
-            segments.append((cur_t, dur, line))
+            full_seg_url = urllib.parse.urljoin(m3u8_url, line) if not line.startswith(("http://", "https://")) else line
+            segments.append((cur_t, dur, full_seg_url))
             cur_t += dur
             pending_dur = None
     return segments, cur_t
@@ -75,7 +182,8 @@ def _write_vod_subplaylist(
 ) -> Tuple[Path, float]:
     """
     Writes a tiny local VOD HLS `.m3u8` (with `#EXT-X-ENDLIST`) containing ONLY the segments
-    overlapping `[start_sec, end_sec]`. Returns `(m3u8_path, local_trim_offset_s)`.
+    overlapping `[start_sec, end_sec]`. Ensures all segment URLs are absolute URLs.
+    Returns `(m3u8_path, local_trim_offset_s)`.
     """
     chosen: List[Tuple[float, float, str]] = []
     for seg_st, seg_dur, seg_url in segments:
@@ -86,7 +194,11 @@ def _write_vod_subplaylist(
         # Fallback to nearest tail segments
         chosen = list(segments[-4:])
 
-    target_dur = max(1, int(round(max((d for _, d, _ in chosen), default=5.0))))
+    valid_chosen = [s for s in chosen if s[2].startswith(("http://", "https://"))]
+    if not valid_chosen:
+        valid_chosen = chosen
+
+    target_dur = max(1, int(round(max((d for _, d, _ in valid_chosen), default=5.0))))
     lines = [
         "#EXTM3U",
         "#EXT-X-VERSION:3",
@@ -94,73 +206,117 @@ def _write_vod_subplaylist(
         f"#EXT-X-TARGETDURATION:{target_dur}",
         "#EXT-X-MEDIA-SEQUENCE:0",
     ]
-    for _, seg_dur, seg_url in chosen:
+    for _, seg_dur, seg_url in valid_chosen:
         lines.append(f"#EXTINF:{seg_dur:.3f},")
         lines.append(seg_url)
     lines.append("#EXT-X-ENDLIST")
     out_m3u8.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
-    first_seg_start = chosen[0][0] if chosen else start_sec
+    first_seg_start = valid_chosen[0][0] if valid_chosen else start_sec
     trim_offset = max(0.0, start_sec - first_seg_start)
     return out_m3u8, trim_offset
 
 
 def _transcribe_wav_groq_whisper(wav_path: Path, api_key: str) -> List[Dict[str, Any]]:
     """
-    Translates ANY spoken language (Hindi, Hinglish, Spanish, English, etc.) directly into clean
-    English word-timed cues via Groq `/openai/v1/audio/translations` (`whisper-large-v3`).
+    Produces millisecond-accurate English word-timed cues via Groq Whisper:
+      1. Calls `/openai/v1/audio/transcriptions` (`whisper-large-v3-turbo`, `timestamp_granularities[]=word`)
+         first to get exact per-word start/end timestamps AND detected language (~0.4s).
+      2. If spoken language is already English (and contains no Devanagari), returns those EXACT
+         word-level timestamps directly (zero early drift or coarse segment interpolation!).
+      3. If spoken language is non-English (e.g. Hindi/Hinglish/Spanish), translates to clean English
+         via `/openai/v1/audio/translations` (`whisper-large-v3`) and clamps each translated segment
+         tightly to the actual spoken word span from step 1 so captions never lead speech.
     """
     if not api_key or not wav_path.exists() or wav_path.stat().st_size < 1000:
         return []
     try:
         import httpx
 
+        # Pass 1: Fast word-level transcription (exact millisecond word boundaries + language detection)
+        exact_words: List[Dict[str, Any]] = []
+        detected_lang = ""
         with wav_path.open("rb") as f:
-            resp = httpx.post(
-                "https://api.groq.com/openai/v1/audio/translations",
+            resp_tr = httpx.post(
+                "https://api.groq.com/openai/v1/audio/transcriptions",
                 headers={"Authorization": f"Bearer {api_key}"},
                 data={
-                    "model": "whisper-large-v3",
+                    "model": "whisper-large-v3-turbo",
                     "response_format": "verbose_json",
+                    "timestamp_granularities[]": "word",
                 },
                 files={"file": (wav_path.name, f, "audio/wav")},
                 timeout=25.0,
             )
-        if resp.status_code != 200:
-            return []
-        data = resp.json()
-
-        # Build clean English word list with timestamps (directly from words if present, else proportional per segment)
-        flat_words: List[Dict[str, Any]] = []
-        raw_words = data.get("words") or []
-        if raw_words:
-            for w in raw_words:
+        if resp_tr.status_code == 200:
+            tr_data = resp_tr.json()
+            detected_lang = str(tr_data.get("language") or "").strip().lower()
+            for w in (tr_data.get("words") or []):
                 tok = str(w.get("word", "")).strip()
                 if not tok:
                     continue
-                ws = float(w.get("start", 0.0))
+                ws = max(0.0, float(w.get("start", 0.0)))
                 we = max(ws + 0.06, float(w.get("end", ws + 0.14)))
-                flat_words.append({"word": tok, "start": ws, "end": we})
+                exact_words.append({"word": tok, "start": round(ws, 3), "end": round(we, 3)})
+
+        has_non_latin = any(bool(re.search(r"[\u0900-\u097f\u0600-\u06ff\u4e00-\u9fff]", w["word"])) for w in exact_words)
+        is_english = detected_lang in ("en", "english") and not has_non_latin
+
+        flat_words: List[Dict[str, Any]] = []
+        if is_english and exact_words:
+            flat_words = exact_words
         else:
-            for seg in (data.get("segments") or []):
-                txt = str(seg.get("text", "")).strip()
-                if not txt:
-                    continue
-                # Strip any stray non-Latin Devanagari if model ever leaks a token
-                txt = re.sub(r"[\u0900-\u097f]+", "", txt).strip()
-                toks = txt.split()
-                if not toks:
-                    continue
-                s0 = float(seg.get("start", 0.0))
-                s1 = max(s0 + 0.12, float(seg.get("end", s0 + 1.0)))
-                span = s1 - s0
-                weights = [max(2, len(t)) for t in toks]
-                tw = float(sum(weights))
-                cur = s0
-                for tk, wt in zip(toks, weights):
-                    d = span * (wt / tw)
-                    flat_words.append({"word": tk, "start": round(cur, 3), "end": round(cur + d, 3)})
-                    cur += d
+            # Pass 2: Translate Hindi/Hinglish/non-English audio cleanly to English
+            with wav_path.open("rb") as f:
+                resp = httpx.post(
+                    "https://api.groq.com/openai/v1/audio/translations",
+                    headers={"Authorization": f"Bearer {api_key}"},
+                    data={
+                        "model": "whisper-large-v3",
+                        "response_format": "verbose_json",
+                    },
+                    files={"file": (wav_path.name, f, "audio/wav")},
+                    timeout=25.0,
+                )
+            if resp.status_code == 200:
+                data = resp.json()
+                raw_words = data.get("words") or []
+                if raw_words:
+                    for w in raw_words:
+                        tok = re.sub(r"[\u0900-\u097f]+", "", str(w.get("word", ""))).strip()
+                        if not tok:
+                            continue
+                        ws = max(0.0, float(w.get("start", 0.0)))
+                        we = max(ws + 0.06, float(w.get("end", ws + 0.14)))
+                        flat_words.append({"word": tok, "start": round(ws, 3), "end": round(we, 3)})
+                else:
+                    for seg in (data.get("segments") or []):
+                        txt = re.sub(r"[\u0900-\u097f]+", "", str(seg.get("text", ""))).strip()
+                        toks = txt.split()
+                        if not toks:
+                            continue
+                        s0 = max(0.0, float(seg.get("start", 0.0)))
+                        s1 = max(s0 + 0.12, float(seg.get("end", s0 + 1.0)))
+                        # Anchor translated segment start/end tightly to detected speech words from Pass 1
+                        if exact_words:
+                            ov = [ew for ew in exact_words if ew["end"] > s0 - 0.15 and ew["start"] < s1 + 0.15]
+                            if ov:
+                                s0 = max(s0, float(ov[0]["start"]))
+                                s1 = max(s0 + 0.15, min(s1, float(ov[-1]["end"])))
+                        span = max(0.12, s1 - s0)
+                        weights = [max(2, len(t)) for t in toks]
+                        tw = float(sum(weights))
+                        cur = s0
+                        for tk, wt in zip(toks, weights):
+                            d = span * (wt / tw)
+                            flat_words.append({"word": tk, "start": round(cur, 3), "end": round(cur + d, 3)})
+                            cur += d
+            elif exact_words:
+                flat_words = [
+                    {**w, "word": re.sub(r"[\u0900-\u097f]+", "", w["word"]).strip()}
+                    for w in exact_words
+                    if re.sub(r"[\u0900-\u097f]+", "", w["word"]).strip()
+                ]
 
         if not flat_words:
             return []
@@ -342,7 +498,7 @@ def _select_goated_live_specs(
     clip_len = min(22.0, max(12.0, dvr_duration_s * 0.5))
     live_end = max(clip_len, dvr_duration_s - 2.0)
     behind_span = max(clip_len * 2.0, min(float(dvr_behind_sec), live_end))
-    window_start = max(0.0, live_end - behind_span)
+    window_start = max(10.0, live_end - behind_span)
     mode_norm = (live_mode or "live_and_behind").strip().lower()
 
     scan_segs = aud_low_segs if aud_low_segs else aud_hi_segs
@@ -599,43 +755,32 @@ class YtDlpClient:
 
         # 1. Direct in-process yt_dlp for rich, accurate extraction
         try:
-            import yt_dlp
-            ydl_opts: Any = {
-                "quiet": True,
-                "no_warnings": True,
-                "skip_download": True,
-                "noplaylist": True,
-                "extract_flat": False,
-                "nocheckcertificate": True,
-                "socket_timeout": 15,
-            }
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                data = ydl.extract_info(url, download=False)
-                if data:
-                    thumbnail = data.get("thumbnail") or f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg"
-                    is_live = bool(data.get("is_live") or data.get("live_status") == "is_live")
-                    dur = int(data.get("duration") or 0)
-                    if is_live and dur <= 0:
-                        rel_ts = data.get("release_timestamp")
-                        if rel_ts:
-                            dur = max(60, min(14400, int(time.time() - float(rel_ts))))
-                        else:
-                            dur = 3600
-                    return {
-                        "title": data.get("title", f"YouTube Video ({video_id})"),
-                        "uploader": data.get("uploader") or data.get("channel") or "YouTube Creator",
-                        "duration": dur,
-                        "width": data.get("width") or 1920,
-                        "height": data.get("height") or 1080,
-                        "fps": data.get("fps") or 30,
-                        "thumbnail": thumbnail,
-                        "description": (data.get("description") or "")[:500],
-                        "view_count": data.get("view_count") or data.get("concurrent_view_count") or 0,
-                        "video_id": video_id,
-                        "is_live": is_live,
-                        "live_status": str(data.get("live_status") or ("is_live" if is_live else "not_live")),
-                        "status": "loaded",
-                    }
+            data = _extract_info_safe(url, timeout=15)
+            if data:
+                thumbnail = data.get("thumbnail") or f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg"
+                is_live = bool(data.get("is_live") or data.get("live_status") == "is_live")
+                dur = int(data.get("duration") or 0)
+                if is_live and dur <= 0:
+                    rel_ts = data.get("release_timestamp")
+                    if rel_ts:
+                        dur = max(60, min(14400, int(time.time() - float(rel_ts))))
+                    else:
+                        dur = 3600
+                return {
+                    "title": data.get("title", f"YouTube Video ({video_id})"),
+                    "uploader": data.get("uploader") or data.get("channel") or "YouTube Creator",
+                    "duration": dur,
+                    "width": data.get("width") or 1920,
+                    "height": data.get("height") or 1080,
+                    "fps": data.get("fps") or 30,
+                    "thumbnail": thumbnail,
+                    "description": (data.get("description") or "")[:500],
+                    "view_count": data.get("view_count") or data.get("concurrent_view_count") or 0,
+                    "video_id": video_id,
+                    "is_live": is_live,
+                    "live_status": str(data.get("live_status") or ("is_live" if is_live else "not_live")),
+                    "status": "loaded",
+                }
         except Exception:
             pass
 
@@ -643,7 +788,7 @@ class YtDlpClient:
         try:
             oembed_url = f"https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v={video_id}&format=json"
             req = urllib.request.Request(oembed_url, headers={"User-Agent": "Mozilla/5.0"})
-            with urllib.request.urlopen(req, timeout=5) as response:
+            with _safe_urlopen(req, timeout_s=5) as response:
                 if response.status == 200:
                     oembed_data = json.loads(response.read().decode())
                     return {
@@ -687,24 +832,8 @@ class YtDlpClient:
         if not URLValidator.is_valid_youtube_url(url):
             raise ValueError(f"Invalid or unsupported YouTube URL: {url}")
 
-        import yt_dlp
-
         video_id = URLValidator.extract_youtube_video_id(url)
-        ydl_opts: Any = {
-            "quiet": True,
-            "no_warnings": True,
-            "skip_download": True,
-            "noplaylist": True,
-            "nocheckcertificate": True,
-            "socket_timeout": 15,
-        }
-
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info_raw = ydl.extract_info(url, download=False)
-
-        if not info_raw:
-            raise RuntimeError("yt-dlp returned empty video info")
-        info: Dict[str, Any] = dict(info_raw)
+        info = _extract_info_safe(url, timeout=20)
         is_live = bool(info.get("is_live") or info.get("live_status") == "is_live")
 
         # Pull crisp 1080p Full HD source stream + original audio (supports both HTTPS VOD and HLS Live/DVR)
@@ -906,19 +1035,41 @@ class YtDlpClient:
 
                 res = subprocess.run(cmd, capture_output=True, text=True, timeout=90)
                 if res.returncode != 0 or not raw_path.exists() or raw_path.stat().st_size < 1000:
-                    raise RuntimeError(f"FFmpeg clip {idx + 1} fetch failed: {res.stderr[-300:]}")
+                    # Fallback for HLS: direct stream cut from master playlist
+                    if is_hls and vid_url:
+                        cmd_fb = [
+                            ffmpeg_bin, "-y", "-loglevel", "error",
+                            *hls_flags, "-ss", f"{start_sec:.3f}", "-t", f"{seg_dur:.3f}", "-i", vid_url,
+                        ]
+                        if aud_url:
+                            cmd_fb.extend([
+                                *hls_flags, "-ss", f"{start_sec:.3f}", "-t", f"{seg_dur:.3f}", "-i", aud_url,
+                                "-map", "0:v:0", "-map", "1:a:0",
+                            ])
+                        cmd_fb.extend(["-c", "copy", "-shortest", "-movflags", "+faststart", str(raw_path)])
+                        res_fb = subprocess.run(cmd_fb, capture_output=True, text=True, timeout=90)
+                        if res_fb.returncode != 0 or not raw_path.exists() or raw_path.stat().st_size < 1000:
+                            raise RuntimeError(f"FFmpeg clip {idx + 1} fetch failed: {res.stderr[-300:] or res_fb.stderr[-300:]}")
+                    else:
+                        raise RuntimeError(f"FFmpeg clip {idx + 1} fetch failed: {res.stderr[-300:]}")
 
-                # 2. Slice real spoken captions (or reuse precomputed Live Whisper cues / fallback transcribe!)
+                # 2. Extract exact millisecond-synced captions from raw_path itself!
+                # IMPORTANT: Both HLS and HTTPS `-c copy` snap video back to the previous GOP keyframe (1-4s),
+                # so transcribing `raw_path` directly with Groq Whisper word timestamps guarantees 1:1 audio
+                # lock with zero early caption drift! Falls back cleanly to YouTube captions / precomputed cues.
                 pre_cues = spec.get("precomputed_cues") or []
-                if pre_cues:
+                clip_cues = _transcribe_clip_groq_whisper(raw_path, ffmpeg_bin=ffmpeg_bin)
+                if clip_cues:
+                    used_clip_whisper = True
+                elif all_cues:
+                    clip_cues = slice_and_chunk_cues(all_cues, float(start_sec), float(end_sec))
+                    used_clip_whisper = False
+                elif pre_cues:
                     clip_cues = list(pre_cues)
                     used_clip_whisper = True
                 else:
-                    clip_cues = slice_and_chunk_cues(all_cues, float(start_sec), float(end_sec)) if all_cues else []
+                    clip_cues = []
                     used_clip_whisper = False
-                    if not clip_cues and is_live:
-                        clip_cues = _transcribe_clip_groq_whisper(raw_path, ffmpeg_bin=ffmpeg_bin)
-                        used_clip_whisper = bool(clip_cues)
 
                 sub_path_str: Optional[str] = None
                 if clip_cues:
@@ -1048,10 +1199,20 @@ class YtDlpClient:
 
         extracted: List[Dict[str, Any]] = []
         max_workers = min(4, len(clip_specs))
+        last_clip_error: Optional[Exception] = None
         with ThreadPoolExecutor(max_workers=max_workers) as pool:
             futures = {pool.submit(cut_and_caption_clip, idx, sp): idx for idx, sp in enumerate(clip_specs)}
             for fut in as_completed(futures):
-                extracted.append(fut.result())
+                try:
+                    res_clip = fut.result()
+                    if res_clip:
+                        extracted.append(res_clip)
+                except Exception as clip_err:
+                    last_clip_error = clip_err
+                    print(f"[OpenClip] Warning: clip extraction encountered an issue: {clip_err}", file=sys.stderr)
+
+        if not extracted:
+            raise (last_clip_error or RuntimeError("Failed to extract any clips from the video/stream."))
 
         extracted.sort(key=lambda x: x["index"])
 

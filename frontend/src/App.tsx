@@ -8,6 +8,7 @@ import { StudioHub } from './components/hub/StudioHub';
 import { FootballCreatorStudio } from './components/football/FootballCreatorStudio';
 import { AIProvidersStudio } from './components/providers/AIProvidersStudio';
 import { DiagnosticsStudio } from './components/DiagnosticsStudio';
+import { StoryStudio } from './components/story/StoryStudio';
 import { OpenClipDirectorWorkspace } from './components/workspace/OpenClipDirectorWorkspace';
 import { CommandPalette } from './components/command/CommandPalette';
 import { type ClipData } from './components/workspace/ClipReviewCard';
@@ -213,6 +214,8 @@ export function App() {
           }}
         />
       )}
+
+      {activeView === 'story-studio' && <StoryStudio />}
 
       {activeView === 'football-studio' && <FootballCreatorStudio />}
 
