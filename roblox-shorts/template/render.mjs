@@ -136,13 +136,17 @@ if (cmd === 'preview') {
     ff.stdin.end()
     const [code] = await once(ff, 'close')
     // collisions block the video: nothing may pass through anything. Group frames with the same problems.
-    if (clips.length) {
+    const force = process.argv.includes('--force')
+    if (clips.length && !force) {
       fs.rmSync(pictureFile, { force: true })
-      console.log(`\nREFUSED: ${clips.length} frame(s) have parts passing through each other or the floor. Fix them, check with stills, render again.`)
+      console.log(`\nREFUSED: ${clips.length} frame(s) have parts passing through each other or the floor. Fix them, check with stills, render again. (Or pass --force to render anyway).`)
       let last = ''
       for (const c of clips) { const k = c.beat + c.issues.join('|'); if (k !== last) console.log(`CLIP at ${c.t.toFixed(2)}s (beat ${c.beat}): ${c.issues.join('; ')}`); last = k }
       process.exitCode = 1
     } else if (code === 0) {
+      if (clips.length) {
+        console.log(`\nPROCEEDING: ${clips.length} warning frame(s) rendered with --force.`)
+      }
       // 3. the sound effects (one per thing that appears, out/sfx-plan.json), mixed onto the soundtrack, then picture + sound
       let audio = base
       if (base && story.sfx !== false) {

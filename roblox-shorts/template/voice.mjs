@@ -95,7 +95,9 @@ async function freeTts(text, voice, speed = 1) {
   try { mod = await import('msedge-tts') } catch { die('NOT_SET_UP: the free voice package is missing. In the workspace folder run: node setup.mjs') }
   const tts = new mod.MsEdgeTTS()
   try {
-    await tts.setMetadata(voice, mod.OUTPUT_FORMAT.AUDIO_24KHZ_96KBITRATE_MONO_MP3, { wordBoundaryEnabled: true })
+    const voiceName = (voice && voice.includes('-')) ? voice : DEFAULT_VOICE.free
+    const locale = voiceName.split('-').slice(0, 2).join('-') || 'en-US'
+    await tts.setMetadata(voiceName, mod.OUTPUT_FORMAT.AUDIO_24KHZ_96KBITRATE_MONO_MP3, { voiceLocale: locale, wordBoundaryEnabled: true })
     // the free voice changes speed by itself (cleaner than stretching the audio afterwards)
     const rate = speed !== 1 ? { rate: `${speed > 1 ? '+' : '-'}${Math.round(Math.abs(speed - 1) * 100)}%` } : undefined
     const { audioStream, metadataStream } = await tts.toStream(text, rate)
@@ -228,7 +230,7 @@ async function sample() {
 }
 async function make() {
   const story = readStory(), p = pickProvider(story)
-  const main = opt('--voice') || story.voice?.id || DEFAULT_VOICE[p], pause = Number(opt('--pause', 0.15)), speed = Number(opt('--speed', 1))
+  const main = opt('--voice') || (story.voice?.provider === p ? story.voice?.id : null) || DEFAULT_VOICE[p], pause = Number(opt('--pause', 0.15)), speed = Number(opt('--speed', 1))
   const vdir = path.join(PROJECT, 'voice'), cache = path.join(vdir, 'cache')
   fs.mkdirSync(cache, { recursive: true })
   const post = p === 'fish' ? speed : 1 // ElevenLabs and the free voice speed up by themselves; Fish clips are sped up afterwards (pitch kept)
