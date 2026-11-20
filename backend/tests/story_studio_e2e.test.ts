@@ -215,5 +215,53 @@ describe('Story Studio - Milestones 3, 4 & 5 (Renderer, Captions, Sidecars, Sche
       expect(result.encoderUsed).toBeDefined();
       expect(fs.statSync(outMp4).size).toBeGreaterThan(2500);
     }, 45000);
+
+    it('should execute renderAt without ReferenceErrors even with characters and active beats', async () => {
+      const { chromium } = require('playwright');
+      const htmlPath = path.resolve(__dirname, '../src/core/story/renderer/blockworld_scene.html');
+      const chromePath = fs.existsSync('/Applications/Google Chrome.app/Contents/MacOS/Google Chrome')
+        ? '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'
+        : undefined;
+      const browser = await chromium.launch({ executablePath: chromePath, headless: true, args: ['--allow-file-access-from-files'] });
+      const page = await browser.newPage({ viewport: { width: 1080, height: 1920 } });
+      await page.goto(`file://${htmlPath}`);
+      await page.waitForFunction(() => (globalThis as any).initScene !== undefined);
+
+      const sceneInitData = {
+        scene: { id: 's1', location: 'school_hallway', weather: 'clear' },
+        characters: [
+          {
+            id: 'char_speaker',
+            name: 'Speaker',
+            look: { skin: '#fcd34d', top: { style: 'top_hoodie' }, bottom: { style: 'bottom_jeans' } },
+          },
+        ],
+        alignedBeats: [
+          {
+            id: 'b1',
+            speaker: 'char_speaker',
+            startSec: 0.0,
+            endSec: 1.0,
+            words: [{ word: 'Hello', start: 0.1, end: 0.4 }],
+            actions: [{ actor: 'char_speaker', anim: 'talk_gesture', expression: 'happy', startSec: 0 }],
+          },
+        ],
+      };
+
+      await page.evaluate((data: any) => (globalThis as any).initScene(data), sceneInitData);
+
+      // Evaluate renderAt at multiple time points (before, during, and after word)
+      await expect(page.evaluate(() => (globalThis as any).renderAt(0.2))).resolves.toBe(true);
+      await expect(page.evaluate(() => (globalThis as any).renderAt(0.5))).resolves.toBe(true);
+      await expect(page.evaluate(() => (globalThis as any).renderAt(1.5))).resolves.toBe(true);
+
+      // Force test the 3D animateCharacter branch directly
+      await expect(page.evaluate(() => {
+        (globalThis as any).isFallbackMode = false;
+        return (globalThis as any).renderAt(0.2);
+      })).resolves.toBe(true);
+
+      await browser.close();
+    }, 20000);
   });
 });

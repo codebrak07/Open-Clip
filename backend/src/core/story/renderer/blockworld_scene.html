@@ -793,7 +793,7 @@
       });
     }
 
-    function animateCharacter(charObj, anim, t, isSpeaker) {
+    function animateCharacter(charObj, anim, t, isSpeaker, currentBeat) {
       if (isFallbackMode) return;
       // Idle breathing sway
       charObj.rootGroup.position.y = Math.sin(t * 3.5) * 0.03;
@@ -872,7 +872,9 @@
       }
 
       // Real audio envelope-driven mouth flap: strictly speaking character opens mouth ONLY during active word utterances
-      const isWordActive = currentBeat?.words?.some(w => t >= w.start && t <= w.end) || false;
+      const isWordActive = (currentBeat && currentBeat.words)
+        ? currentBeat.words.some(w => t >= w.start && t <= w.end)
+        : false;
       const mouthOpen = isSpeaker && isWordActive && (Math.sin(t * 24) > -0.25);
       if (mouthOpen !== charObj.isMouthOpen || charObj.currentExpression !== charObj.lastExpr) {
         charObj.isMouthOpen = mouthOpen;
@@ -1187,7 +1189,7 @@
             { anim: isSpeaker ? 'talk_gesture' : 'idle', expression: 'neutral' };
 
           charObj.currentExpression = activeAction.expression || 'neutral';
-          animateCharacter(charObj, activeAction.anim || 'idle', t, isSpeaker);
+          animateCharacter(charObj, activeAction.anim || 'idle', t, isSpeaker, currentBeat);
         });
 
         // Smoke puff animation in 3D
